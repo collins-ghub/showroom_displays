@@ -1,13 +1,16 @@
+import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { env } from "@/lib/env";
+import type { ShowroomImage } from "@/lib/supabase/types";
 import { withUrls } from "@/lib/images";
 import { parseSettingsRows } from "@/lib/settings";
-import type { ShowroomImage } from "@/lib/supabase/types";
-import Slideshow from "./Slideshow";
 
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export default async function DisplayPage() {
+// Public endpoint — uses the anon key so we exercise RLS the same way
+// the TVs would if we ever moved this client-side.
+export async function GET() {
   const supabase = createClient(env.supabaseUrl, env.supabaseAnonKey, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
@@ -21,10 +24,20 @@ export default async function DisplayPage() {
     supabase.from("showroom_settings").select("key, value, updated_at"),
   ]);
 
+  if (imagesRes.error) {
+    return NextResponse.json({ error: imagesRes.error.message }, { status: 500 });
+  }
+  if (settingsRes.error) {
+    return NextResponse.json({ error: settingsRes.error.message }, { status: 500 });
+  }
+
   const images = withUrls((imagesRes.data ?? []) as ShowroomImage[]);
   const settings = parseSettingsRows(
     (settingsRes.data ?? []) as Array<{ key: string; value: unknown }>
   );
+
+  // Highest updated_at across images + settings. Client polls and rebuilds
+  // its slide list when this changes.
   const stamps = [
     ...images.map((i) => i.updated_at),
     ...((settingsRes.data ?? []) as Array<{ updated_at: string }>).map(
@@ -33,5 +46,8 @@ export default async function DisplayPage() {
   ];
   const version = stamps.sort().at(-1) ?? "";
 
-  return <Slideshow initial={{ images, settings, version }} />;
+  return NextResponse.json(
+    { images, settings, version },
+    { headers: { "Cache-Control": "no-store" } }
+  );
 }
