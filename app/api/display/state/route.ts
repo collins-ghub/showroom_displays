@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { unstable_noStore as noStore } from "next/cache";
 import { env } from "@/lib/env";
 import type { ShowroomImage } from "@/lib/supabase/types";
 import { withUrls } from "@/lib/images";
@@ -7,12 +8,20 @@ import { parseSettingsRows } from "@/lib/settings";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
+export const fetchCache = "force-no-store";
 
 // Public endpoint — uses the anon key so we exercise RLS the same way
 // the TVs would if we ever moved this client-side.
 export async function GET() {
+  noStore();
   const supabase = createClient(env.supabaseUrl, env.supabaseAnonKey, {
     auth: { persistSession: false, autoRefreshToken: false },
+    global: {
+      // Bypass Next.js's data cache for the underlying Supabase REST calls.
+      fetch: (input, init) =>
+        fetch(input, { ...init, cache: "no-store" }),
+    },
   });
 
   const [imagesRes, settingsRes] = await Promise.all([

@@ -1,4 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
+import { unstable_noStore as noStore } from "next/cache";
 import { env } from "@/lib/env";
 import { withUrls } from "@/lib/images";
 import { parseSettingsRows } from "@/lib/settings";
@@ -6,10 +7,17 @@ import type { ShowroomImage } from "@/lib/supabase/types";
 import Slideshow from "./Slideshow";
 
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
+export const fetchCache = "force-no-store";
 
 export default async function DisplayPage() {
+  noStore();
   const supabase = createClient(env.supabaseUrl, env.supabaseAnonKey, {
     auth: { persistSession: false, autoRefreshToken: false },
+    global: {
+      fetch: (input, init) =>
+        fetch(input, { ...init, cache: "no-store" }),
+    },
   });
 
   const [imagesRes, settingsRes] = await Promise.all([
