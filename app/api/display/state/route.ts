@@ -5,6 +5,7 @@ import { env } from "@/lib/env";
 import type { ShowroomImage } from "@/lib/supabase/types";
 import { withUrls } from "@/lib/images";
 import { parseSettingsRows } from "@/lib/settings";
+import { findCurrentOrUpcomingEvent, type ShowroomEvent } from "@/lib/calendar";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -45,6 +46,17 @@ export async function GET() {
     (settingsRes.data ?? []) as Array<{ key: string; value: unknown }>
   );
 
+  let event: ShowroomEvent | null = null;
+  if (settings.show_calendar) {
+    try {
+      event = await findCurrentOrUpcomingEvent();
+    } catch (e) {
+      // Calendar API failures shouldn't break the slideshow.
+      console.error("Calendar fetch failed:", e);
+      event = null;
+    }
+  }
+
   // Highest updated_at across images + settings. Client polls and rebuilds
   // its slide list when this changes.
   const stamps = [
@@ -56,7 +68,7 @@ export async function GET() {
   const version = stamps.sort().at(-1) ?? "";
 
   return NextResponse.json(
-    { images, settings, version },
+    { images, settings, version, event },
     { headers: { "Cache-Control": "no-store" } }
   );
 }

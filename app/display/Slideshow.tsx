@@ -3,11 +3,13 @@
 import { useEffect, useRef, useState } from "react";
 import type { ImageWithUrl } from "@/lib/images";
 import type { DisplaySettings } from "@/lib/settings";
+import type { ShowroomEvent } from "@/lib/calendar";
 
 type State = {
   images: ImageWithUrl[];
   settings: DisplaySettings;
   version: string;
+  event: ShowroomEvent | null;
 };
 
 type Props = {
@@ -57,8 +59,12 @@ export default function Slideshow({ initial }: Props) {
     return () => clearTimeout(id);
   }, [index, state]);
 
-  const welcome = state.settings.welcome_override ?? "Welcome";
   const showBanner = !state.settings.slideshow_only;
+  const event = state.settings.show_calendar ? state.event : null;
+  const welcomeText = event
+    ? `Welcome ${event.name}`
+    : state.settings.welcome_override ?? "Welcome";
+  const eventTime = event?.startsAtFormatted ?? "";
 
   if (state.images.length === 0) {
     return (
@@ -96,7 +102,12 @@ export default function Slideshow({ initial }: Props) {
       {showBanner && (
         <div className="absolute inset-x-0 bottom-0 p-8 bg-gradient-to-t from-black/80 to-transparent">
           <div className="text-white text-5xl font-semibold drop-shadow-lg">
-            {welcome}
+            {welcomeText}
+            {eventTime && (
+              <span className="ml-4 text-3xl font-normal text-white/80">
+                — {eventTime}
+              </span>
+            )}
           </div>
         </div>
       )}

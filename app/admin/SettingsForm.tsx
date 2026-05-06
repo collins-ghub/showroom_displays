@@ -60,6 +60,15 @@ export default function SettingsForm({ initial }: { initial: DisplaySettings }) 
         Slideshow only (hide welcome banner)
       </label>
 
+      <label className="flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={settings.show_calendar}
+          onChange={(e) => save({ show_calendar: e.target.checked })}
+        />
+        Use Google Calendar to personalize the welcome
+      </label>
+
       <div className="text-xs text-neutral-500 h-4">
         {saving ? "Saving…" : savedAt ? "Saved." : ""}
         {error && <span className="text-red-400 ml-2">{error}</span>}

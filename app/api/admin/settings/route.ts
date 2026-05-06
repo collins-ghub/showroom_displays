@@ -48,6 +48,15 @@ export async function PUT(req: Request) {
     }
     updates.push({ key: "slideshow_only", value: body.slideshow_only });
   }
+  if ("show_calendar" in body) {
+    if (typeof body.show_calendar !== "boolean") {
+      return NextResponse.json(
+        { error: "show_calendar must be boolean" },
+        { status: 400 }
+      );
+    }
+    updates.push({ key: "show_calendar", value: body.show_calendar });
+  }
   if (updates.length === 0) {
     return NextResponse.json({ error: "No fields to update" }, { status: 400 });
   }
