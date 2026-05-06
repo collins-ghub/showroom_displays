@@ -71,14 +71,27 @@ export default function Slideshow({ initial }: Props) {
   return (
     <div className="fixed inset-0 bg-black overflow-hidden">
       {state.images.map((img, i) => (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
+        <div
           key={img.id}
-          src={img.url}
-          alt=""
-          className="absolute inset-0 w-full h-full object-cover transition-opacity duration-1000 ease-in-out"
+          className="absolute inset-0 transition-opacity duration-1000 ease-in-out"
           style={{ opacity: i === index ? 1 : 0 }}
-        />
+        >
+          {/* Blurred background fills any letterbox space */}
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={img.url}
+            alt=""
+            aria-hidden
+            className="absolute inset-0 w-full h-full object-cover scale-110 blur-2xl opacity-60"
+          />
+          {/* Foreground: full image, no cropping */}
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={img.url}
+            alt=""
+            className="absolute inset-0 w-full h-full object-contain"
+          />
+        </div>
       ))}
       {showBanner && (
         <div className="absolute inset-x-0 bottom-0 p-8 bg-gradient-to-t from-black/80 to-transparent">
