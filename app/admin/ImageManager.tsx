@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition, useRef } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import {
   DndContext,
   PointerSensor,
@@ -185,18 +185,7 @@ function SortableRow({
           {image.size_bytes ? `${Math.round(image.size_bytes / 1024)} KB` : ""}
         </div>
       </div>
-      <label className="text-xs text-neutral-400 flex items-center gap-1">
-        Duration
-        <input
-          type="number"
-          min={500}
-          step={500}
-          value={image.duration_ms}
-          onChange={(e) => onDuration(Number(e.target.value))}
-          className="w-24 px-2 py-1 rounded bg-neutral-900 border border-neutral-700 text-sm"
-        />
-        ms
-      </label>
+      <DurationInput value={image.duration_ms} onCommit={onDuration} />
       <label className="text-xs flex items-center gap-1">
         <input
           type="checkbox"
@@ -212,5 +201,44 @@ function SortableRow({
         Delete
       </button>
     </li>
+  );
+}
+
+function DurationInput({
+  value,
+  onCommit,
+}: {
+  value: number;
+  onCommit: (ms: number) => void;
+}) {
+  const [draft, setDraft] = useState(String(value));
+  useEffect(() => {
+    setDraft(String(value));
+  }, [value]);
+  function commit() {
+    const n = Number(draft);
+    if (!Number.isFinite(n) || n < 500 || n > 600_000) {
+      setDraft(String(value));
+      return;
+    }
+    if (n !== value) onCommit(n);
+  }
+  return (
+    <label className="text-xs text-neutral-400 flex items-center gap-1">
+      Duration
+      <input
+        type="number"
+        min={500}
+        step={500}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+        }}
+        className="w-24 px-2 py-1 rounded bg-neutral-900 border border-neutral-700 text-sm"
+      />
+      ms
+    </label>
   );
 }
