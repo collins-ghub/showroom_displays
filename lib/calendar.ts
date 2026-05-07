@@ -90,8 +90,13 @@ export async function findCurrentOrUpcomingEvent(
   let event: ShowroomEvent | null = null;
   if (chosen) {
     const startsAt = chosen.start?.dateTime ?? chosen.start?.date ?? "";
+    const summary = (chosen.summary ?? "").trim();
+    // If the title is like "Collins Showroom Visit (Test Visitor)", show just
+    // the visitor name in parentheses.
+    const paren = summary.match(/\(([^)]+)\)\s*$/);
+    const name = (paren ? paren[1] : summary).trim() || "Guest";
     event = {
-      name: (chosen.summary ?? "").trim() || "Guest",
+      name,
       startsAt,
       endsAt: chosen.end?.dateTime ?? chosen.end?.date ?? "",
       startsAtFormatted: formatTime(startsAt),
