@@ -101,6 +101,13 @@ export default function Slideshow({ initial }: Props) {
           />
         </div>
       ))}
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src="/logo.svg"
+        alt=""
+        aria-hidden
+        className="absolute top-8 right-8 h-24 w-auto opacity-90 drop-shadow-[0_2px_8px_rgba(0,0,0,0.8)]"
+      />
       {showBanner && (
         <div className="absolute inset-x-0 bottom-0 p-8 bg-gradient-to-t from-black/80 to-transparent">
           <div className="text-white text-5xl font-semibold drop-shadow-lg">
