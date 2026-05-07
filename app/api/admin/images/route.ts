@@ -1,8 +1,13 @@
 import { NextResponse } from "next/server";
+import sharp from "sharp";
 import { isAdminAuthed } from "@/lib/auth";
 import { createAdminSupabase } from "@/lib/supabase/admin";
 import { env } from "@/lib/env";
 import type { ShowroomImage } from "@/lib/supabase/types";
+
+const MAX_WIDTH = 1920;
+const MAX_HEIGHT = 1920;
+const WEBP_QUALITY = 82;
 
 export const runtime = "nodejs";
 
@@ -33,13 +38,31 @@ export async function POST(req: Request) {
   }
 
   const supabase = createAdminSupabase();
-  const ext = (file.name.split(".").pop() ?? "bin").toLowerCase().replace(/[^a-z0-9]/g, "");
-  const storagePath = `${crypto.randomUUID()}.${ext}`;
+  const storagePath = `${crypto.randomUUID()}.webp`;
+  const contentType = "image/webp";
 
-  const buffer = Buffer.from(await file.arrayBuffer());
+  // Downscale + re-encode as WebP so the TVs aren't pulling 8 MB phone photos.
+  // EXIF rotation is honored, then stripped along with other metadata.
+  const original = Buffer.from(await file.arrayBuffer());
+  let buffer: Buffer;
+  try {
+    buffer = await sharp(original)
+      .rotate()
+      .resize({
+        width: MAX_WIDTH,
+        height: MAX_HEIGHT,
+        fit: "inside",
+        withoutEnlargement: true,
+      })
+      .webp({ quality: WEBP_QUALITY })
+      .toBuffer();
+  } catch {
+    return NextResponse.json({ error: "Could not process image" }, { status: 400 });
+  }
+
   const { error: upErr } = await supabase.storage
     .from(env.storageBucket)
-    .upload(storagePath, buffer, { contentType: file.type, upsert: false });
+    .upload(storagePath, buffer, { contentType, upsert: false });
   if (upErr) return NextResponse.json({ error: upErr.message }, { status: 500 });
 
   const { data: maxRow } = await supabase
@@ -55,8 +78,8 @@ export async function POST(req: Request) {
     .insert({
       storage_path: storagePath,
       file_name: file.name,
-      mime_type: file.type,
-      size_bytes: file.size,
+      mime_type: contentType,
+      size_bytes: buffer.byteLength,
       position: nextPosition,
     })
     .select("*")
