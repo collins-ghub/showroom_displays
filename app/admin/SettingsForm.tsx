@@ -37,6 +37,9 @@ export default function SettingsForm({ initial }: { initial: DisplaySettings }) 
 
       <label className="block">
         <span className="text-sm text-neutral-300">Welcome message override</span>
+        <span className="block text-xs text-neutral-500">
+          Shown when no calendar event is matched.
+        </span>
         <input
           type="text"
           placeholder="(leave blank for default 'Welcome')"
@@ -47,6 +50,25 @@ export default function SettingsForm({ initial }: { initial: DisplaySettings }) 
           onBlur={(e) =>
             save({ welcome_override: e.target.value.trim() === "" ? null : e.target.value })
           }
+          className="mt-1 w-full px-3 py-2 rounded bg-neutral-900 border border-neutral-700"
+        />
+      </label>
+
+      <label className="block">
+        <span className="text-sm text-neutral-300">Welcome template (with calendar event)</span>
+        <span className="block text-xs text-neutral-500">
+          Use <code className="text-neutral-300">{"{name}"}</code> for the event title and{" "}
+          <code className="text-neutral-300">{"{time}"}</code> for the start time. Example:{" "}
+          <span className="text-neutral-400">Welcome {"{name}"}! Your appointment is at {"{time}"}.</span>
+        </span>
+        <input
+          type="text"
+          placeholder="Welcome {name} — {time}"
+          value={settings.welcome_template}
+          onChange={(e) =>
+            setSettings({ ...settings, welcome_template: e.target.value })
+          }
+          onBlur={(e) => save({ welcome_template: e.target.value })}
           className="mt-1 w-full px-3 py-2 rounded bg-neutral-900 border border-neutral-700"
         />
       </label>

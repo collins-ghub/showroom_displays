@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { ImageWithUrl } from "@/lib/images";
-import type { DisplaySettings } from "@/lib/settings";
+import { renderWelcomeTemplate, type DisplaySettings } from "@/lib/settings";
 import type { ShowroomEvent } from "@/lib/calendar";
 
 type State = {
@@ -62,9 +62,11 @@ export default function Slideshow({ initial }: Props) {
   const showBanner = !state.settings.slideshow_only;
   const event = state.settings.show_calendar ? state.event : null;
   const welcomeText = event
-    ? `Welcome ${event.name}`
+    ? renderWelcomeTemplate(state.settings.welcome_template, {
+        name: event.name,
+        time: event.startsAtFormatted,
+      })
     : state.settings.welcome_override ?? "Welcome";
-  const eventTime = event?.startsAtFormatted ?? "";
 
   if (state.images.length === 0) {
     return (
@@ -103,11 +105,6 @@ export default function Slideshow({ initial }: Props) {
         <div className="absolute inset-x-0 bottom-0 p-8 bg-gradient-to-t from-black/80 to-transparent">
           <div className="text-white text-5xl font-semibold drop-shadow-lg">
             {welcomeText}
-            {eventTime && (
-              <span className="ml-4 text-3xl font-normal text-white/80">
-                — {eventTime}
-              </span>
-            )}
           </div>
         </div>
       )}

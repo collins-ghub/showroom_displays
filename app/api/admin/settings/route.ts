@@ -39,6 +39,19 @@ export async function PUT(req: Request) {
     const trimmed = typeof v === "string" ? v.trim() : null;
     updates.push({ key: "welcome_override", value: trimmed && trimmed.length > 0 ? trimmed : null });
   }
+  if ("welcome_template" in body) {
+    if (typeof body.welcome_template !== "string") {
+      return NextResponse.json(
+        { error: "welcome_template must be string" },
+        { status: 400 }
+      );
+    }
+    const trimmed = body.welcome_template.trim();
+    updates.push({
+      key: "welcome_template",
+      value: trimmed.length > 0 ? body.welcome_template : "Welcome {name} — {time}",
+    });
+  }
   if ("slideshow_only" in body) {
     if (typeof body.slideshow_only !== "boolean") {
       return NextResponse.json(
