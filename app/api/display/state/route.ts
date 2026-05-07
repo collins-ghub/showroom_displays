@@ -65,7 +65,11 @@ export async function GET() {
       (s) => s.updated_at
     ),
   ];
-  const version = stamps.sort().at(-1) ?? "";
+  const dataVersion = stamps.sort().at(-1) ?? "";
+  // Fold the event identity in so the banner refreshes when the calendar
+  // changes, even if no images/settings were edited.
+  const eventKey = event ? `${event.startsAt}|${event.endsAt}|${event.name}` : "none";
+  const version = `${dataVersion}#${eventKey}`;
 
   return NextResponse.json(
     { images, settings, version, event },
