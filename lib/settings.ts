@@ -3,6 +3,7 @@ export type DisplaySettings = {
   welcome_template: string;
   slideshow_only: boolean;
   show_calendar: boolean;
+  shuffle: boolean;
 };
 
 export const DEFAULT_WELCOME_TEMPLATE = "Welcome {name} — {time}";
@@ -12,6 +13,7 @@ export const DEFAULT_SETTINGS: DisplaySettings = {
   welcome_template: DEFAULT_WELCOME_TEMPLATE,
   slideshow_only: false,
   show_calendar: true,
+  shuffle: false,
 };
 
 export function parseSettingsRows(
@@ -30,6 +32,8 @@ export function parseSettingsRows(
       out.slideshow_only = r.value === true;
     } else if (r.key === "show_calendar") {
       out.show_calendar = r.value !== false; // default true
+    } else if (r.key === "shuffle") {
+      out.shuffle = r.value === true;
     }
   }
   return out;

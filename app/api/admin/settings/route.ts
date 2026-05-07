@@ -70,6 +70,15 @@ export async function PUT(req: Request) {
     }
     updates.push({ key: "show_calendar", value: body.show_calendar });
   }
+  if ("shuffle" in body) {
+    if (typeof body.shuffle !== "boolean") {
+      return NextResponse.json(
+        { error: "shuffle must be boolean" },
+        { status: 400 }
+      );
+    }
+    updates.push({ key: "shuffle", value: body.shuffle });
+  }
   if (updates.length === 0) {
     return NextResponse.json({ error: "No fields to update" }, { status: 400 });
   }
