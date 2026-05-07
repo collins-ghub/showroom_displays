@@ -18,6 +18,36 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import type { ImageWithUrl } from "@/lib/images";
 
+const CLIENT_MAX_DIM = 2400;
+const CLIENT_QUALITY = 0.85;
+
+// Downscale + re-encode in the browser so we don't hit Vercel's 4.5 MB
+// request body limit. The server still does its own pass to WebP at 1920px.
+async function compressImage(file: File): Promise<File> {
+  if (!file.type.startsWith("image/")) return file;
+  try {
+    const bitmap = await createImageBitmap(file);
+    const scale = Math.min(1, CLIENT_MAX_DIM / Math.max(bitmap.width, bitmap.height));
+    const w = Math.round(bitmap.width * scale);
+    const h = Math.round(bitmap.height * scale);
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return file;
+    ctx.drawImage(bitmap, 0, 0, w, h);
+    const blob = await new Promise<Blob | null>((resolve) =>
+      canvas.toBlob(resolve, "image/jpeg", CLIENT_QUALITY)
+    );
+    if (!blob) return file;
+    if (blob.size >= file.size) return file;
+    const base = file.name.replace(/\.[^.]+$/, "");
+    return new File([blob], `${base}.jpg`, { type: "image/jpeg" });
+  } catch {
+    return file;
+  }
+}
+
 export default function ImageManager({ initialImages }: { initialImages: ImageWithUrl[] }) {
   const [images, setImages] = useState<ImageWithUrl[]>(initialImages);
   const [uploading, setUploading] = useState(false);
@@ -33,12 +63,23 @@ export default function ImageManager({ initialImages }: { initialImages: ImageWi
     setUploading(true);
     try {
       for (const file of Array.from(files)) {
+        const compressed = await compressImage(file);
         const fd = new FormData();
-        fd.append("file", file);
+        fd.append("file", compressed, compressed.name);
         const res = await fetch("/api/admin/images", { method: "POST", body: fd });
-        const json = await res.json();
+        const text = await res.text();
+        let json: { image?: ImageWithUrl; error?: string } = {};
+        try {
+          json = text ? JSON.parse(text) : {};
+        } catch {
+          throw new Error(
+            res.status === 413
+              ? "File too large for the server. Try a smaller image."
+              : `Upload failed (${res.status})`
+          );
+        }
         if (!res.ok) throw new Error(json.error ?? "Upload failed");
-        const img = json.image;
+        const img = json.image!;
         setImages((prev) => [
           ...prev,
           {
