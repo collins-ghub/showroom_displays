@@ -85,6 +85,16 @@ export async function PUT(req: Request) {
 
   const supabase = createAdminSupabase();
   for (const u of updates) {
+    // The value column is NOT NULL, so clearing a setting (e.g. the welcome
+    // override) deletes the row; parseSettingsRows falls back to the default.
+    if (u.value === null) {
+      const { error } = await supabase
+        .from("showroom_settings")
+        .delete()
+        .eq("key", u.key);
+      if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+      continue;
+    }
     const { error } = await supabase
       .from("showroom_settings")
       .upsert({ key: u.key, value: u.value }, { onConflict: "key" });
