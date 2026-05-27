@@ -42,7 +42,7 @@ export default function SettingsForm({ initial }: { initial: DisplaySettings }) 
         </span>
         <input
           type="text"
-          placeholder="(leave blank for default 'Welcome')"
+          placeholder="(leave blank for default 'Welcome to Collins')"
           value={settings.welcome_override ?? ""}
           onChange={(e) =>
             setSettings({ ...settings, welcome_override: e.target.value })
