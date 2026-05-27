@@ -94,7 +94,7 @@ export default function Slideshow({ initial }: Props) {
         name: event.name,
         time: event.startsAtFormatted,
       })
-    : state.settings.welcome_override ?? "Welcome";
+    : state.settings.welcome_override ?? "Welcome to Collins";
 
   if (state.images.length === 0) {
     return (
