@@ -152,7 +152,7 @@ export default function Slideshow({ initial }: Props) {
       />
       {showBanner && (
         <div className="absolute inset-x-0 bottom-0 p-8 bg-gradient-to-t from-black/80 to-transparent">
-          <div className="text-white text-5xl font-semibold drop-shadow-lg">
+          <div className="text-white text-4xl font-semibold drop-shadow-lg">
             {welcomeText}
           </div>
         </div>
