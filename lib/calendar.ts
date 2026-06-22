@@ -44,23 +44,78 @@ function calClient() {
   return cachedClient;
 }
 
-const LOOKAHEAD_MS = 30 * 60 * 1000;
 const LOOKBACK_MS = 5 * 60 * 1000; // grace for events that just ended
 
 // Module-level cache: avoid hitting the Calendar API on every poll.
-let cache: { at: number; event: ShowroomEvent | null } | null = null;
+let cache: { at: number; events: ShowroomEvent[] } | null = null;
 const CACHE_TTL_MS = 60 * 1000;
 
-export async function findCurrentOrUpcomingEvent(
+// Offset (zone - UTC) in ms for the given instant, computed from Intl so we
+// don't need a tz library.
+function tzOffsetMs(date: Date, timeZone: string): number {
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+  const map: Record<string, string> = {};
+  for (const p of dtf.formatToParts(date)) map[p.type] = p.value;
+  const asUTC = Date.UTC(
+    +map.year,
+    +map.month - 1,
+    +map.day,
+    +map.hour === 24 ? 0 : +map.hour,
+    +map.minute,
+    +map.second
+  );
+  return asUTC - date.getTime();
+}
+
+// End of the current calendar day (23:59:59.999) in the showroom timezone,
+// returned as an ISO instant.
+function endOfDayISO(now: Date): string {
+  const tz = process.env.SHOWROOM_TIMEZONE;
+  if (!tz) {
+    const d = new Date(now);
+    d.setHours(23, 59, 59, 999);
+    return d.toISOString();
+  }
+  const dateParts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+  const map: Record<string, string> = {};
+  for (const p of dateParts) map[p.type] = p.value;
+  const offset = tzOffsetMs(now, tz);
+  const endLocalAsUTC = Date.UTC(+map.year, +map.month - 1, +map.day, 23, 59, 59, 999);
+  return new Date(endLocalAsUTC - offset).toISOString();
+}
+
+// All appointments from now (minus a short grace) through the end of the
+// showroom's day, in chronological order. The display rotates through them.
+export async function listTodaysRemainingEvents(
   now: Date = new Date()
-): Promise<ShowroomEvent | null> {
+): Promise<ShowroomEvent[]> {
   if (cache && now.getTime() - cache.at < CACHE_TTL_MS) {
-    return cache.event;
+    return cache.events;
   }
 
   const calendarId = required("GOOGLE_CALENDAR_ID", process.env.GOOGLE_CALENDAR_ID);
   const timeMin = new Date(now.getTime() - LOOKBACK_MS).toISOString();
-  const timeMax = new Date(now.getTime() + LOOKAHEAD_MS).toISOString();
+  const timeMax = endOfDayISO(now);
+
+  // If we're already past end of day (clock skew), nothing to show.
+  if (new Date(timeMax).getTime() <= new Date(timeMin).getTime()) {
+    cache = { at: now.getTime(), events: [] };
+    return [];
+  }
 
   const res = await calClient().events.list({
     calendarId,
@@ -68,41 +123,27 @@ export async function findCurrentOrUpcomingEvent(
     timeMax,
     singleEvents: true,
     orderBy: "startTime",
-    maxResults: 10,
+    maxResults: 50,
   });
 
-  const events = res.data.items ?? [];
-  // Prefer the event currently in progress; otherwise the soonest upcoming.
-  let chosen: (typeof events)[number] | null = null;
-  for (const ev of events) {
+  const events: ShowroomEvent[] = [];
+  for (const ev of res.data.items ?? []) {
     const startStr = ev.start?.dateTime ?? ev.start?.date;
     const endStr = ev.end?.dateTime ?? ev.end?.date;
     if (!startStr || !endStr) continue;
-    const start = new Date(startStr).getTime();
-    const end = new Date(endStr).getTime();
-    if (start <= now.getTime() && now.getTime() < end) {
-      chosen = ev;
-      break;
-    }
-    if (!chosen && start > now.getTime()) chosen = ev;
-  }
-
-  let event: ShowroomEvent | null = null;
-  if (chosen) {
-    const startsAt = chosen.start?.dateTime ?? chosen.start?.date ?? "";
-    const summary = (chosen.summary ?? "").trim();
+    const summary = (ev.summary ?? "").trim();
     // If the title is like "Collins Showroom Visit (Test Visitor)", show just
     // the visitor name in parentheses.
     const paren = summary.match(/\(([^)]+)\)\s*$/);
     const name = (paren ? paren[1] : summary).trim() || "Guest";
-    event = {
+    events.push({
       name,
-      startsAt,
-      endsAt: chosen.end?.dateTime ?? chosen.end?.date ?? "",
-      startsAtFormatted: formatTime(startsAt),
-    };
+      startsAt: startStr,
+      endsAt: endStr,
+      startsAtFormatted: formatTime(startStr),
+    });
   }
 
-  cache = { at: now.getTime(), event };
-  return event;
+  cache = { at: now.getTime(), events };
+  return events;
 }

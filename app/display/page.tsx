@@ -4,7 +4,7 @@ import { env } from "@/lib/env";
 import { withUrls } from "@/lib/images";
 import { parseSettingsRows } from "@/lib/settings";
 import type { ShowroomImage } from "@/lib/supabase/types";
-import { findCurrentOrUpcomingEvent, type ShowroomEvent } from "@/lib/calendar";
+import { listTodaysRemainingEvents, type ShowroomEvent } from "@/lib/calendar";
 import Slideshow from "./Slideshow";
 
 export const dynamic = "force-dynamic";
@@ -35,10 +35,10 @@ export default async function DisplayPage() {
     (settingsRes.data ?? []) as Array<{ key: string; value: unknown }>
   );
 
-  let event: ShowroomEvent | null = null;
+  let events: ShowroomEvent[] = [];
   if (settings.show_calendar) {
     try {
-      event = await findCurrentOrUpcomingEvent();
+      events = await listTodaysRemainingEvents();
     } catch (e) {
       console.error("Calendar fetch failed:", e);
     }
@@ -50,7 +50,12 @@ export default async function DisplayPage() {
       (s) => s.updated_at
     ),
   ];
-  const version = stamps.sort().at(-1) ?? "";
+  const dataVersion = stamps.sort().at(-1) ?? "";
+  const eventKey =
+    events.length > 0
+      ? events.map((e) => `${e.startsAt}|${e.endsAt}|${e.name}`).join(",")
+      : "none";
+  const version = `${dataVersion}#${eventKey}`;
 
-  return <Slideshow initial={{ images, settings, version, event }} />;
+  return <Slideshow initial={{ images, settings, version, events }} />;
 }

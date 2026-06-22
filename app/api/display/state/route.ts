@@ -5,7 +5,7 @@ import { env } from "@/lib/env";
 import type { ShowroomImage } from "@/lib/supabase/types";
 import { withUrls } from "@/lib/images";
 import { parseSettingsRows } from "@/lib/settings";
-import { findCurrentOrUpcomingEvent, type ShowroomEvent } from "@/lib/calendar";
+import { listTodaysRemainingEvents, type ShowroomEvent } from "@/lib/calendar";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -46,14 +46,14 @@ export async function GET() {
     (settingsRes.data ?? []) as Array<{ key: string; value: unknown }>
   );
 
-  let event: ShowroomEvent | null = null;
+  let events: ShowroomEvent[] = [];
   if (settings.show_calendar) {
     try {
-      event = await findCurrentOrUpcomingEvent();
+      events = await listTodaysRemainingEvents();
     } catch (e) {
       // Calendar API failures shouldn't break the slideshow.
       console.error("Calendar fetch failed:", e);
-      event = null;
+      events = [];
     }
   }
 
@@ -66,13 +66,16 @@ export async function GET() {
     ),
   ];
   const dataVersion = stamps.sort().at(-1) ?? "";
-  // Fold the event identity in so the banner refreshes when the calendar
-  // changes, even if no images/settings were edited.
-  const eventKey = event ? `${event.startsAt}|${event.endsAt}|${event.name}` : "none";
+  // Fold the event list into the version so the banner refreshes when the
+  // calendar changes, even if no images/settings were edited.
+  const eventKey =
+    events.length > 0
+      ? events.map((e) => `${e.startsAt}|${e.endsAt}|${e.name}`).join(",")
+      : "none";
   const version = `${dataVersion}#${eventKey}`;
 
   return NextResponse.json(
-    { images, settings, version, event },
+    { images, settings, version, events },
     { headers: { "Cache-Control": "no-store" } }
   );
 }

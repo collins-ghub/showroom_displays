@@ -9,7 +9,7 @@ type State = {
   images: ImageWithUrl[];
   settings: DisplaySettings;
   version: string;
-  event: ShowroomEvent | null;
+  events: ShowroomEvent[];
 };
 
 type Props = {
@@ -17,6 +17,7 @@ type Props = {
 };
 
 const POLL_MS = 15_000;
+const EVENT_ROTATE_MS = 8_000;
 
 function shuffled<T>(items: T[]): T[] {
   const a = items.slice();
@@ -30,6 +31,7 @@ function shuffled<T>(items: T[]): T[] {
 export default function Slideshow({ initial }: Props) {
   const [state, setState] = useState<State>(initial);
   const [index, setIndex] = useState(0);
+  const [eventIndex, setEventIndex] = useState(0);
   const [shuffleEpoch, setShuffleEpoch] = useState(0);
   const versionRef = useRef(initial.version);
 
@@ -59,6 +61,7 @@ export default function Slideshow({ initial }: Props) {
           versionRef.current = next.version;
           setState(next);
           setIndex(0);
+          setEventIndex(0);
         }
       } catch {
         // Fire Sticks lose Wi-Fi sometimes; just try again next interval.
@@ -87,12 +90,23 @@ export default function Slideshow({ initial }: Props) {
     return () => clearTimeout(id);
   }, [index, displayImages, state.settings.shuffle]);
 
+  const events = state.settings.show_calendar ? state.events : [];
+
+  // Cycle through every appointment left in the day, 8s per welcome.
+  useEffect(() => {
+    if (events.length < 2) return;
+    const id = setInterval(() => {
+      setEventIndex((i) => (i + 1) % events.length);
+    }, EVENT_ROTATE_MS);
+    return () => clearInterval(id);
+  }, [events.length, state.version]);
+
   const showBanner = !state.settings.slideshow_only;
-  const event = state.settings.show_calendar ? state.event : null;
-  const welcomeText = event
+  const currentEvent = events.length > 0 ? events[eventIndex % events.length] : null;
+  const welcomeText = currentEvent
     ? renderWelcomeTemplate(state.settings.welcome_template, {
-        name: event.name,
-        time: event.startsAtFormatted,
+        name: currentEvent.name,
+        time: currentEvent.startsAtFormatted,
       })
     : state.settings.welcome_override ?? "Welcome to Collins";
 
