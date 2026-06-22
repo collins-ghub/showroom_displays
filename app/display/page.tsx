@@ -4,7 +4,7 @@ import { env } from "@/lib/env";
 import { withUrls } from "@/lib/images";
 import { parseSettingsRows } from "@/lib/settings";
 import type { ShowroomImage } from "@/lib/supabase/types";
-import { listTodaysRemainingEvents, type ShowroomEvent } from "@/lib/calendar";
+import { listTodaysEvents, type ShowroomEvent } from "@/lib/calendar";
 import Slideshow from "./Slideshow";
 
 export const dynamic = "force-dynamic";
@@ -38,7 +38,7 @@ export default async function DisplayPage() {
   let events: ShowroomEvent[] = [];
   if (settings.show_calendar) {
     try {
-      events = await listTodaysRemainingEvents();
+      events = await listTodaysEvents();
     } catch (e) {
       console.error("Calendar fetch failed:", e);
     }

@@ -44,8 +44,6 @@ function calClient() {
   return cachedClient;
 }
 
-const LOOKBACK_MS = 5 * 60 * 1000; // grace for events that just ended
-
 // Module-level cache: avoid hitting the Calendar API on every poll.
 let cache: { at: number; events: ShowroomEvent[] } | null = null;
 const CACHE_TTL_MS = 60 * 1000;
@@ -76,14 +74,16 @@ function tzOffsetMs(date: Date, timeZone: string): number {
   return asUTC - date.getTime();
 }
 
-// End of the current calendar day (23:59:59.999) in the showroom timezone,
-// returned as an ISO instant.
-function endOfDayISO(now: Date): string {
+// Start (00:00:00.000) and end (23:59:59.999) of the current calendar day in
+// the showroom timezone, returned as ISO instants.
+function dayBoundsISO(now: Date): { start: string; end: string } {
   const tz = process.env.SHOWROOM_TIMEZONE;
   if (!tz) {
-    const d = new Date(now);
-    d.setHours(23, 59, 59, 999);
-    return d.toISOString();
+    const s = new Date(now);
+    s.setHours(0, 0, 0, 0);
+    const e = new Date(now);
+    e.setHours(23, 59, 59, 999);
+    return { start: s.toISOString(), end: e.toISOString() };
   }
   const dateParts = new Intl.DateTimeFormat("en-CA", {
     timeZone: tz,
@@ -94,13 +94,20 @@ function endOfDayISO(now: Date): string {
   const map: Record<string, string> = {};
   for (const p of dateParts) map[p.type] = p.value;
   const offset = tzOffsetMs(now, tz);
-  const endLocalAsUTC = Date.UTC(+map.year, +map.month - 1, +map.day, 23, 59, 59, 999);
-  return new Date(endLocalAsUTC - offset).toISOString();
+  const y = +map.year;
+  const m = +map.month - 1;
+  const d = +map.day;
+  const startLocalAsUTC = Date.UTC(y, m, d, 0, 0, 0, 0);
+  const endLocalAsUTC = Date.UTC(y, m, d, 23, 59, 59, 999);
+  return {
+    start: new Date(startLocalAsUTC - offset).toISOString(),
+    end: new Date(endLocalAsUTC - offset).toISOString(),
+  };
 }
 
-// All appointments from now (minus a short grace) through the end of the
-// showroom's day, in chronological order. The display rotates through them.
-export async function listTodaysRemainingEvents(
+// Every appointment scheduled for today (including ones that already ended),
+// in chronological order. The display rotates through them.
+export async function listTodaysEvents(
   now: Date = new Date()
 ): Promise<ShowroomEvent[]> {
   if (cache && now.getTime() - cache.at < CACHE_TTL_MS) {
@@ -108,14 +115,7 @@ export async function listTodaysRemainingEvents(
   }
 
   const calendarId = required("GOOGLE_CALENDAR_ID", process.env.GOOGLE_CALENDAR_ID);
-  const timeMin = new Date(now.getTime() - LOOKBACK_MS).toISOString();
-  const timeMax = endOfDayISO(now);
-
-  // If we're already past end of day (clock skew), nothing to show.
-  if (new Date(timeMax).getTime() <= new Date(timeMin).getTime()) {
-    cache = { at: now.getTime(), events: [] };
-    return [];
-  }
+  const { start: timeMin, end: timeMax } = dayBoundsISO(now);
 
   const res = await calClient().events.list({
     calendarId,

@@ -5,7 +5,7 @@ import { env } from "@/lib/env";
 import type { ShowroomImage } from "@/lib/supabase/types";
 import { withUrls } from "@/lib/images";
 import { parseSettingsRows } from "@/lib/settings";
-import { listTodaysRemainingEvents, type ShowroomEvent } from "@/lib/calendar";
+import { listTodaysEvents, type ShowroomEvent } from "@/lib/calendar";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -49,7 +49,7 @@ export async function GET() {
   let events: ShowroomEvent[] = [];
   if (settings.show_calendar) {
     try {
-      events = await listTodaysRemainingEvents();
+      events = await listTodaysEvents();
     } catch (e) {
       // Calendar API failures shouldn't break the slideshow.
       console.error("Calendar fetch failed:", e);
