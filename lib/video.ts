@@ -2,7 +2,7 @@
 
 // Client-side video compression with ffmpeg.wasm. Loaded lazily from a CDN
 // (single-threaded core, so no COOP/COEP headers are required) the first time
-// an admin uploads a video. Big phone/4K clips get re-encoded to ~1080p H.264
+// an admin uploads a video. Big phone/4K clips get re-encoded to ~720p H.264
 // in the browser BEFORE upload, so Supabase only ever stores the small copy.
 
 type Progress = (ratio: number) => void;
@@ -49,16 +49,40 @@ async function getFFmpeg() {
   return ffmpeg;
 }
 
+function parseClock(m: RegExpMatchArray | null): number | null {
+  if (!m) return null;
+  return Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
+}
+
 // Returns a compressed MP4, or the original file if compression fails or
 // wouldn't actually make it smaller.
 export async function compressVideo(file: File, onProgress?: Progress): Promise<File> {
   const ffmpeg = await getFFmpeg();
   const { fetchFile } = window.FFmpegUtil;
 
-  const handler = ({ progress }: { progress: number }) => {
-    if (onProgress) onProgress(Math.max(0, Math.min(1, progress)));
+  // Safari doesn't reliably fire the "progress" event for the single-threaded
+  // core, so we also derive progress from ffmpeg's log output (time= vs the
+  // input Duration), and log everything for diagnostics.
+  let duration = 0;
+  const report = (ratio: number) => {
+    if (onProgress && Number.isFinite(ratio)) {
+      onProgress(Math.max(0, Math.min(1, ratio)));
+    }
   };
-  ffmpeg.on("progress", handler);
+  const logHandler = ({ message }: { message: string }) => {
+    console.log("[ffmpeg]", message);
+    if (!duration) {
+      const d = parseClock(message.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/));
+      if (d && d > 0) duration = d;
+    }
+    if (duration) {
+      const t = parseClock(message.match(/time=\s*(\d+):(\d+):(\d+(?:\.\d+)?)/));
+      if (t !== null) report(t / duration);
+    }
+  };
+  const progressHandler = ({ progress }: { progress: number }) => report(progress);
+  ffmpeg.on("log", logHandler);
+  ffmpeg.on("progress", progressHandler);
 
   const ext =
     (file.name.split(".").pop() || "mp4").toLowerCase().replace(/[^a-z0-9]/g, "") || "mp4";
@@ -70,19 +94,20 @@ export async function compressVideo(file: File, onProgress?: Progress): Promise<
     await ffmpeg.exec([
       "-i",
       inName,
-      // Cap the long edge at 1920px; -2 keeps aspect ratio and even dimensions.
+      // Cap the long edge at 1280px; -2 keeps aspect ratio and even dimensions.
+      // 720p + ultrafast keeps in-browser encoding fast enough to be usable.
       "-vf",
-      "scale='min(1920,iw)':-2",
+      "scale='min(1280,iw)':-2",
       "-c:v",
       "libx264",
       "-preset",
-      "veryfast",
+      "ultrafast",
       "-crf",
       "28",
       "-c:a",
       "aac",
       "-b:a",
-      "128k",
+      "96k",
       // Move the moov atom up front so playback can start before full download.
       "-movflags",
       "+faststart",
@@ -100,6 +125,9 @@ export async function compressVideo(file: File, onProgress?: Progress): Promise<
     const base = file.name.replace(/\.[^.]+$/, "");
     return new File([blob], `${base}.mp4`, { type: "video/mp4" });
   } finally {
-    if (typeof ffmpeg.off === "function") ffmpeg.off("progress", handler);
+    if (typeof ffmpeg.off === "function") {
+      ffmpeg.off("log", logHandler);
+      ffmpeg.off("progress", progressHandler);
+    }
   }
 }
