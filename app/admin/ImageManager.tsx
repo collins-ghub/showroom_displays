@@ -23,8 +23,10 @@ import { env } from "@/lib/env";
 
 const CLIENT_MAX_DIM = 2400;
 const CLIENT_QUALITY = 0.85;
-// Give up on in-browser compression after this long and upload the original.
-const COMPRESS_TIMEOUT_MS = 3 * 60 * 1000;
+// In-browser encoding is slow (~0.2x realtime) but that's fine as long as it's
+// making progress. Only give up if ffmpeg goes completely silent for this long
+// (a genuine hang), then upload the original instead.
+const STALL_TIMEOUT_MS = 3 * 60 * 1000;
 
 function isVideo(mime: string | null | undefined): boolean {
   return !!mime && mime.startsWith("video/");
@@ -113,28 +115,45 @@ export default function ImageManager({ initialImages }: { initialImages: ImageWi
 
   // Videos: try to compress in-browser to ~720p (250 MB clips become tens of
   // MB), then upload straight to Supabase via a signed URL and register the
-  // row. If compression fails, stalls, or takes too long (Safari struggles
-  // with very large files), abort and upload the original file directly.
+  // row. Encoding is slow but allowed to run as long as it's making progress;
+  // only a genuine hang (no activity for STALL_TIMEOUT_MS) aborts it, and
+  // then we upload the original file directly.
   async function uploadVideo(file: File) {
     let toUpload = file;
+    let lastActivity = Date.now();
+    let watchdog: ReturnType<typeof setInterval> | undefined;
+    const bump = () => {
+      lastActivity = Date.now();
+    };
+    const stalled = new Promise<never>((_, reject) => {
+      watchdog = setInterval(() => {
+        if (Date.now() - lastActivity > STALL_TIMEOUT_MS) {
+          reject(new Error("compression stalled (no progress)"));
+        }
+      }, 5_000);
+    });
     try {
       setStatus(`Compressing ${file.name}… 0%`);
-      const timeout = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("compression timed out")), COMPRESS_TIMEOUT_MS)
-      );
       toUpload = await Promise.race([
-        compressVideo(file, (r) =>
-          setStatus(`Compressing ${file.name}… ${Math.round(r * 100)}%`)
+        compressVideo(
+          file,
+          (r) => {
+            bump();
+            setStatus(`Compressing ${file.name}… ${Math.round(r * 100)}%`);
+          },
+          bump
         ),
-        timeout,
+        stalled,
       ]);
     } catch (e) {
-      // Couldn't transcode (unsupported device / CDN blocked / too slow).
-      // Kill any hung worker and fall back to uploading the original.
+      // Couldn't transcode (unsupported device / CDN blocked / hung).
+      // Kill any stuck worker and fall back to uploading the original.
       console.error("Video compression failed:", e);
       resetFFmpeg();
       setStatus(`Uploading original ${file.name}…`);
       toUpload = file;
+    } finally {
+      if (watchdog) clearInterval(watchdog);
     }
 
     // Ensure a video MIME type even when the browser reported none, so the

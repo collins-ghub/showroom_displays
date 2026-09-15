@@ -6,6 +6,9 @@
 // in the browser BEFORE upload, so Supabase only ever stores the small copy.
 
 type Progress = (ratio: number) => void;
+// Called whenever ffmpeg shows signs of life (any log line, load milestones),
+// so callers can tell "slow but working" apart from "hung".
+type Activity = () => void;
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 declare global {
@@ -72,8 +75,13 @@ function parseClock(m: RegExpMatchArray | null): number | null {
 
 // Returns a compressed MP4, or the original file if compression fails or
 // wouldn't actually make it smaller.
-export async function compressVideo(file: File, onProgress?: Progress): Promise<File> {
+export async function compressVideo(
+  file: File,
+  onProgress?: Progress,
+  onActivity?: Activity
+): Promise<File> {
   const ffmpeg = await getFFmpeg();
+  onActivity?.();
   const { fetchFile } = window.FFmpegUtil;
 
   // Safari doesn't reliably fire the "progress" event for the single-threaded
@@ -87,6 +95,7 @@ export async function compressVideo(file: File, onProgress?: Progress): Promise<
   };
   const logHandler = ({ message }: { message: string }) => {
     console.log("[ffmpeg]", message);
+    onActivity?.();
     if (!duration) {
       const d = parseClock(message.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/));
       if (d && d > 0) duration = d;
@@ -107,6 +116,7 @@ export async function compressVideo(file: File, onProgress?: Progress): Promise<
 
   try {
     await ffmpeg.writeFile(inName, await fetchFile(file));
+    onActivity?.();
     await ffmpeg.exec([
       "-i",
       inName,
