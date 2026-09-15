@@ -28,6 +28,19 @@ function isVideo(mime: string | null | undefined): boolean {
   return !!mime && mime.startsWith("video/");
 }
 
+const VIDEO_EXTS = [
+  "mp4", "mov", "m4v", "webm", "avi", "mkv", "ogv", "3gp", "mpg", "mpeg", "wmv", "flv",
+];
+
+// Some files (esp. .mov/.m4v) come through with an empty or generic MIME type,
+// so fall back to the extension to decide the upload path.
+function isVideoFile(file: File): boolean {
+  if (file.type.startsWith("video/")) return true;
+  if (file.type.startsWith("image/")) return false;
+  const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
+  return VIDEO_EXTS.includes(ext);
+}
+
 // Downscale + re-encode in the browser so we don't hit Vercel's 4.5 MB
 // request body limit. The server still does its own pass to WebP at 1920px.
 async function compressImage(file: File): Promise<File> {
@@ -106,9 +119,16 @@ export default function ImageManager({ initialImages }: { initialImages: ImageWi
       toUpload = await compressVideo(file, (r) =>
         setStatus(`Compressing ${file.name}… ${Math.round(r * 100)}%`)
       );
-    } catch {
-      toUpload = file; // couldn't transcode (unsupported device / CDN blocked)
+    } catch (e) {
+      // Couldn't transcode (unsupported device / CDN blocked). Log it so we can
+      // diagnose, then fall back to the original file.
+      console.error("Video compression failed:", e);
+      toUpload = file;
     }
+
+    // Ensure a video MIME type even when the browser reported none, so the
+    // display renders it as a video rather than a broken image.
+    const contentType = toUpload.type?.startsWith("video/") ? toUpload.type : "video/mp4";
 
     setStatus(`Uploading ${toUpload.name}…`);
     const urlRes = await fetch("/api/admin/images/upload-url", {
@@ -123,7 +143,7 @@ export default function ImageManager({ initialImages }: { initialImages: ImageWi
     const { error: upErr } = await supabase.storage
       .from(env.storageBucket)
       .uploadToSignedUrl(urlJson.path, urlJson.token, toUpload, {
-        contentType: toUpload.type,
+        contentType,
       });
     if (upErr) throw new Error(upErr.message);
 
@@ -133,7 +153,7 @@ export default function ImageManager({ initialImages }: { initialImages: ImageWi
       body: JSON.stringify({
         storage_path: urlJson.path,
         file_name: toUpload.name,
-        mime_type: toUpload.type,
+        mime_type: contentType,
         size_bytes: toUpload.size,
       }),
     });
@@ -148,7 +168,7 @@ export default function ImageManager({ initialImages }: { initialImages: ImageWi
     setUploading(true);
     try {
       for (const file of Array.from(files)) {
-        if (file.type.startsWith("video/")) {
+        if (isVideoFile(file)) {
           await uploadVideo(file);
         } else {
           await uploadImage(file);
