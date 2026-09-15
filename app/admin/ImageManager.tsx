@@ -17,9 +17,15 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import type { ImageWithUrl } from "@/lib/images";
+import { createBrowserSupabase } from "@/lib/supabase/browser";
+import { env } from "@/lib/env";
 
 const CLIENT_MAX_DIM = 2400;
 const CLIENT_QUALITY = 0.85;
+
+function isVideo(mime: string | null | undefined): boolean {
+  return !!mime && mime.startsWith("video/");
+}
 
 // Downscale + re-encode in the browser so we don't hit Vercel's 4.5 MB
 // request body limit. The server still does its own pass to WebP at 1920px.
@@ -57,38 +63,82 @@ export default function ImageManager({ initialImages }: { initialImages: ImageWi
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
 
+  function addToState(img: ImageWithUrl | Omit<ImageWithUrl, "url">) {
+    setImages((prev) => [
+      ...prev,
+      {
+        ...img,
+        url: `${env.supabaseUrl}/storage/v1/object/public/${env.storageBucket}/${img.storage_path}`,
+      },
+    ]);
+  }
+
+  // Images: compress in-browser and POST through our API (small enough).
+  async function uploadImage(file: File) {
+    const compressed = await compressImage(file);
+    const fd = new FormData();
+    fd.append("file", compressed, compressed.name);
+    const res = await fetch("/api/admin/images", { method: "POST", body: fd });
+    const text = await res.text();
+    let json: { image?: ImageWithUrl; error?: string } = {};
+    try {
+      json = text ? JSON.parse(text) : {};
+    } catch {
+      throw new Error(
+        res.status === 413
+          ? "File too large for the server. Try a smaller image."
+          : `Upload failed (${res.status})`
+      );
+    }
+    if (!res.ok) throw new Error(json.error ?? "Upload failed");
+    addToState(json.image!);
+  }
+
+  // Videos: too big for the 4.5 MB API limit, so upload straight to Supabase
+  // via a signed upload URL, then register the row.
+  async function uploadVideo(file: File) {
+    const urlRes = await fetch("/api/admin/images/upload-url", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fileName: file.name }),
+    });
+    const urlJson = await urlRes.json().catch(() => ({}));
+    if (!urlRes.ok) throw new Error(urlJson.error ?? "Could not start upload");
+
+    const supabase = createBrowserSupabase();
+    const { error: upErr } = await supabase.storage
+      .from(env.storageBucket)
+      .uploadToSignedUrl(urlJson.path, urlJson.token, file, {
+        contentType: file.type,
+      });
+    if (upErr) throw new Error(upErr.message);
+
+    const regRes = await fetch("/api/admin/images", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        storage_path: urlJson.path,
+        file_name: file.name,
+        mime_type: file.type,
+        size_bytes: file.size,
+      }),
+    });
+    const regJson = await regRes.json().catch(() => ({}));
+    if (!regRes.ok) throw new Error(regJson.error ?? "Could not save video");
+    addToState(regJson.image);
+  }
+
   async function handleUpload(files: FileList | null) {
     if (!files || files.length === 0) return;
     setError(null);
     setUploading(true);
     try {
       for (const file of Array.from(files)) {
-        const compressed = await compressImage(file);
-        const fd = new FormData();
-        fd.append("file", compressed, compressed.name);
-        const res = await fetch("/api/admin/images", { method: "POST", body: fd });
-        const text = await res.text();
-        let json: { image?: ImageWithUrl; error?: string } = {};
-        try {
-          json = text ? JSON.parse(text) : {};
-        } catch {
-          throw new Error(
-            res.status === 413
-              ? "File too large for the server. Try a smaller image."
-              : `Upload failed (${res.status})`
-          );
+        if (file.type.startsWith("video/")) {
+          await uploadVideo(file);
+        } else {
+          await uploadImage(file);
         }
-        if (!res.ok) throw new Error(json.error ?? "Upload failed");
-        const img = json.image!;
-        setImages((prev) => [
-          ...prev,
-          {
-            ...img,
-            url: `${
-              process.env.NEXT_PUBLIC_SUPABASE_URL
-            }/storage/v1/object/public/showroom-images/${img.storage_path}`,
-          },
-        ]);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Upload failed");
@@ -150,7 +200,7 @@ export default function ImageManager({ initialImages }: { initialImages: ImageWi
         <input
           ref={fileInput}
           type="file"
-          accept="image/*"
+          accept="image/*,video/*"
           multiple
           onChange={(e) => handleUpload(e.target.files)}
           className="text-sm"
@@ -214,19 +264,36 @@ function SortableRow({
       >
         ⠠
       </button>
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img
-        src={image.url}
-        alt={image.file_name}
-        className="w-24 h-16 object-cover rounded bg-neutral-800"
-      />
+      {isVideo(image.mime_type) ? (
+        <video
+          src={image.url}
+          muted
+          playsInline
+          preload="metadata"
+          className="w-24 h-16 object-cover rounded bg-neutral-800"
+        />
+      ) : (
+        /* eslint-disable-next-line @next/next/no-img-element */
+        <img
+          src={image.url}
+          alt={image.file_name}
+          className="w-24 h-16 object-cover rounded bg-neutral-800"
+        />
+      )}
       <div className="flex-1 min-w-0">
-        <div className="truncate text-sm">{image.file_name}</div>
+        <div className="truncate text-sm">
+          {isVideo(image.mime_type) && <span className="text-neutral-500">▶ </span>}
+          {image.file_name}
+        </div>
         <div className="text-xs text-neutral-500">
           {image.size_bytes ? `${Math.round(image.size_bytes / 1024)} KB` : ""}
         </div>
       </div>
-      <DurationInput value={image.duration_ms} onCommit={onDuration} />
+      {isVideo(image.mime_type) ? (
+        <span className="text-xs text-neutral-500">Plays full length</span>
+      ) : (
+        <DurationInput value={image.duration_ms} onCommit={onDuration} />
+      )}
       <label className="text-xs flex items-center gap-1">
         <input
           type="checkbox"

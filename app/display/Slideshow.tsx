@@ -1,9 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ImageWithUrl } from "@/lib/images";
 import { renderWelcomeTemplate, type DisplaySettings } from "@/lib/settings";
 import type { ShowroomEvent } from "@/lib/calendar";
+
+function isVideo(mime: string | null | undefined): boolean {
+  return !!mime && mime.startsWith("video/");
+}
 
 type State = {
   images: ImageWithUrl[];
@@ -34,6 +38,7 @@ export default function Slideshow({ initial }: Props) {
   const [eventIndex, setEventIndex] = useState(0);
   const [shuffleEpoch, setShuffleEpoch] = useState(0);
   const versionRef = useRef(initial.version);
+  const videoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
 
   // Reorder slides when shuffle is on. Re-roll each time the loop completes
   // so the order isn't the same every cycle.
@@ -74,21 +79,43 @@ export default function Slideshow({ initial }: Props) {
     };
   }, []);
 
-  // Advance to the next slide based on the current image's duration.
+  const advance = useCallback(() => {
+    setIndex((i) => {
+      if (displayImages.length === 0) return 0;
+      const next = (i + 1) % displayImages.length;
+      if (next === 0 && state.settings.shuffle) setShuffleEpoch((e) => e + 1);
+      return next;
+    });
+  }, [displayImages.length, state.settings.shuffle]);
+
+  // Advance photos on their duration; videos advance when they finish playing.
   useEffect(() => {
     if (displayImages.length === 0) return;
     const current = displayImages[index] ?? displayImages[0];
+    if (isVideo(current.mime_type)) return;
     const ms = Math.max(500, current.duration_ms ?? 7000);
-    const id = setTimeout(() => {
-      setIndex((i) => {
-        if (displayImages.length === 0) return 0;
-        const next = (i + 1) % displayImages.length;
-        if (next === 0 && state.settings.shuffle) setShuffleEpoch((e) => e + 1);
-        return next;
-      });
-    }, ms);
+    const id = setTimeout(advance, ms);
     return () => clearTimeout(id);
-  }, [index, displayImages, state.settings.shuffle]);
+  }, [index, displayImages, advance]);
+
+  // Play only the active video (rewound to the start); pause the rest.
+  useEffect(() => {
+    const current = displayImages[index];
+    videoRefs.current.forEach((el, id) => {
+      if (current && id === current.id && isVideo(current.mime_type)) {
+        try {
+          el.currentTime = 0;
+        } catch {
+          // some browsers throw if metadata isn't ready yet; play() still works
+        }
+        el.play().catch(() => {
+          // autoplay can be refused momentarily; onError/ended keep us moving
+        });
+      } else {
+        el.pause();
+      }
+    });
+  }, [index, displayImages]);
 
   const events = state.settings.show_calendar ? state.events : [];
 
@@ -126,21 +153,41 @@ export default function Slideshow({ initial }: Props) {
           className="absolute inset-0 transition-opacity duration-1000 ease-in-out"
           style={{ opacity: i === index ? 1 : 0 }}
         >
-          {/* Blurred background fills any letterbox space */}
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={img.url}
-            alt=""
-            aria-hidden
-            className="absolute inset-0 w-full h-full object-cover scale-110 blur-2xl opacity-60"
-          />
-          {/* Foreground: full image, no cropping */}
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={img.url}
-            alt=""
-            className="absolute inset-0 w-full h-full object-contain"
-          />
+          {isVideo(img.mime_type) ? (
+            <video
+              ref={(el) => {
+                if (el) videoRefs.current.set(img.id, el);
+                else videoRefs.current.delete(img.id);
+              }}
+              src={img.url}
+              muted
+              playsInline
+              preload="auto"
+              onEnded={advance}
+              onError={() => {
+                if (displayImages[index]?.id === img.id) advance();
+              }}
+              className="absolute inset-0 w-full h-full object-contain"
+            />
+          ) : (
+            <>
+              {/* Blurred background fills any letterbox space */}
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={img.url}
+                alt=""
+                aria-hidden
+                className="absolute inset-0 w-full h-full object-cover scale-110 blur-2xl opacity-60"
+              />
+              {/* Foreground: full image, no cropping */}
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={img.url}
+                alt=""
+                className="absolute inset-0 w-full h-full object-contain"
+              />
+            </>
+          )}
         </div>
       ))}
       {/* eslint-disable-next-line @next/next/no-img-element */}
