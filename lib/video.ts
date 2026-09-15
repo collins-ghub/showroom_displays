@@ -44,16 +44,20 @@ export function resetFFmpeg() {
 
 async function getFFmpeg() {
   if (ffmpegInstance) return ffmpegInstance;
-  await loadScript(`https://unpkg.com/@ffmpeg/ffmpeg@${FFMPEG_VER}/dist/umd/ffmpeg.js`);
+  const ffmpegBase = `https://unpkg.com/@ffmpeg/ffmpeg@${FFMPEG_VER}/dist/umd`;
+  await loadScript(`${ffmpegBase}/ffmpeg.js`);
   // NB: the util UMD bundle is published as index.js (not util.js).
   await loadScript(`https://unpkg.com/@ffmpeg/util@${UTIL_VER}/dist/umd/index.js`);
   const { FFmpeg } = window.FFmpegWASM;
   const { toBlobURL } = window.FFmpegUtil;
   const ffmpeg = new FFmpeg();
-  const base = `https://unpkg.com/@ffmpeg/core@${CORE_VER}/dist/umd`;
+  const coreBase = `https://unpkg.com/@ffmpeg/core@${CORE_VER}/dist/umd`;
   await ffmpeg.load({
-    coreURL: await toBlobURL(`${base}/ffmpeg-core.js`, "text/javascript"),
-    wasmURL: await toBlobURL(`${base}/ffmpeg-core.wasm`, "application/wasm"),
+    // A cross-origin URL can't be used directly as a Worker script, so load the
+    // worker as a same-origin blob. (Webpack names this chunk 814.ffmpeg.js.)
+    classWorkerURL: await toBlobURL(`${ffmpegBase}/814.ffmpeg.js`, "text/javascript"),
+    coreURL: await toBlobURL(`${coreBase}/ffmpeg-core.js`, "text/javascript"),
+    wasmURL: await toBlobURL(`${coreBase}/ffmpeg-core.wasm`, "application/wasm"),
   });
   ffmpegInstance = ffmpeg;
   return ffmpeg;
