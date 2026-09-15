@@ -51,7 +51,9 @@ async function getFFmpeg() {
   const { FFmpeg } = window.FFmpegWASM;
   const { toBlobURL } = window.FFmpegUtil;
   const ffmpeg = new FFmpeg();
-  const coreBase = `https://unpkg.com/@ffmpeg/core@${CORE_VER}/dist/umd`;
+  // The worker is a module worker and pulls the core in via import(), so it
+  // needs the ESM build (which has the `export default createFFmpegCore`).
+  const coreBase = `https://unpkg.com/@ffmpeg/core@${CORE_VER}/dist/esm`;
   await ffmpeg.load({
     // A cross-origin URL can't be used directly as a Worker script, so load the
     // worker as a same-origin blob. (Webpack names this chunk 814.ffmpeg.js.)
