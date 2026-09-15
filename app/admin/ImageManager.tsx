@@ -18,6 +18,7 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import type { ImageWithUrl } from "@/lib/images";
 import { createBrowserSupabase } from "@/lib/supabase/browser";
+import { compressVideo } from "@/lib/video";
 import { env } from "@/lib/env";
 
 const CLIENT_MAX_DIM = 2400;
@@ -57,6 +58,7 @@ async function compressImage(file: File): Promise<File> {
 export default function ImageManager({ initialImages }: { initialImages: ImageWithUrl[] }) {
   const [images, setImages] = useState<ImageWithUrl[]>(initialImages);
   const [uploading, setUploading] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [, startTransition] = useTransition();
   const fileInput = useRef<HTMLInputElement | null>(null);
@@ -94,13 +96,25 @@ export default function ImageManager({ initialImages }: { initialImages: ImageWi
     addToState(json.image!);
   }
 
-  // Videos: too big for the 4.5 MB API limit, so upload straight to Supabase
-  // via a signed upload URL, then register the row.
+  // Videos: compress in-browser to ~1080p first (250 MB clips become tens of
+  // MB), then upload the small copy straight to Supabase via a signed URL and
+  // register the row. If compression fails, fall back to the original file.
   async function uploadVideo(file: File) {
+    let toUpload = file;
+    try {
+      setStatus(`Compressing ${file.name}… 0%`);
+      toUpload = await compressVideo(file, (r) =>
+        setStatus(`Compressing ${file.name}… ${Math.round(r * 100)}%`)
+      );
+    } catch {
+      toUpload = file; // couldn't transcode (unsupported device / CDN blocked)
+    }
+
+    setStatus(`Uploading ${toUpload.name}…`);
     const urlRes = await fetch("/api/admin/images/upload-url", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fileName: file.name }),
+      body: JSON.stringify({ fileName: toUpload.name }),
     });
     const urlJson = await urlRes.json().catch(() => ({}));
     if (!urlRes.ok) throw new Error(urlJson.error ?? "Could not start upload");
@@ -108,8 +122,8 @@ export default function ImageManager({ initialImages }: { initialImages: ImageWi
     const supabase = createBrowserSupabase();
     const { error: upErr } = await supabase.storage
       .from(env.storageBucket)
-      .uploadToSignedUrl(urlJson.path, urlJson.token, file, {
-        contentType: file.type,
+      .uploadToSignedUrl(urlJson.path, urlJson.token, toUpload, {
+        contentType: toUpload.type,
       });
     if (upErr) throw new Error(upErr.message);
 
@@ -118,9 +132,9 @@ export default function ImageManager({ initialImages }: { initialImages: ImageWi
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         storage_path: urlJson.path,
-        file_name: file.name,
-        mime_type: file.type,
-        size_bytes: file.size,
+        file_name: toUpload.name,
+        mime_type: toUpload.type,
+        size_bytes: toUpload.size,
       }),
     });
     const regJson = await regRes.json().catch(() => ({}));
@@ -144,6 +158,7 @@ export default function ImageManager({ initialImages }: { initialImages: ImageWi
       setError(e instanceof Error ? e.message : "Upload failed");
     } finally {
       setUploading(false);
+      setStatus(null);
       if (fileInput.current) fileInput.current.value = "";
     }
   }
@@ -205,7 +220,9 @@ export default function ImageManager({ initialImages }: { initialImages: ImageWi
           onChange={(e) => handleUpload(e.target.files)}
           className="text-sm"
         />
-        {uploading && <span className="text-sm text-neutral-400">Uploading…</span>}
+        {uploading && (
+          <span className="text-sm text-neutral-400">{status ?? "Uploading…"}</span>
+        )}
       </div>
       {error && <p className="text-sm text-red-400">{error}</p>}
       {images.length === 0 ? (
