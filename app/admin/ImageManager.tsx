@@ -18,11 +18,13 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import type { ImageWithUrl } from "@/lib/images";
 import { createBrowserSupabase } from "@/lib/supabase/browser";
-import { compressVideo } from "@/lib/video";
+import { compressVideo, resetFFmpeg } from "@/lib/video";
 import { env } from "@/lib/env";
 
 const CLIENT_MAX_DIM = 2400;
 const CLIENT_QUALITY = 0.85;
+// Give up on in-browser compression after this long and upload the original.
+const COMPRESS_TIMEOUT_MS = 3 * 60 * 1000;
 
 function isVideo(mime: string | null | undefined): boolean {
   return !!mime && mime.startsWith("video/");
@@ -109,20 +111,29 @@ export default function ImageManager({ initialImages }: { initialImages: ImageWi
     addToState(json.image!);
   }
 
-  // Videos: compress in-browser to ~1080p first (250 MB clips become tens of
-  // MB), then upload the small copy straight to Supabase via a signed URL and
-  // register the row. If compression fails, fall back to the original file.
+  // Videos: try to compress in-browser to ~720p (250 MB clips become tens of
+  // MB), then upload straight to Supabase via a signed URL and register the
+  // row. If compression fails, stalls, or takes too long (Safari struggles
+  // with very large files), abort and upload the original file directly.
   async function uploadVideo(file: File) {
     let toUpload = file;
     try {
       setStatus(`Compressing ${file.name}… 0%`);
-      toUpload = await compressVideo(file, (r) =>
-        setStatus(`Compressing ${file.name}… ${Math.round(r * 100)}%`)
+      const timeout = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("compression timed out")), COMPRESS_TIMEOUT_MS)
       );
+      toUpload = await Promise.race([
+        compressVideo(file, (r) =>
+          setStatus(`Compressing ${file.name}… ${Math.round(r * 100)}%`)
+        ),
+        timeout,
+      ]);
     } catch (e) {
-      // Couldn't transcode (unsupported device / CDN blocked). Log it so we can
-      // diagnose, then fall back to the original file.
+      // Couldn't transcode (unsupported device / CDN blocked / too slow).
+      // Kill any hung worker and fall back to uploading the original.
       console.error("Video compression failed:", e);
+      resetFFmpeg();
+      setStatus(`Uploading original ${file.name}…`);
       toUpload = file;
     }
 

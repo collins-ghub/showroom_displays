@@ -32,6 +32,16 @@ function loadScript(src: string): Promise<void> {
 
 let ffmpegInstance: any = null;
 
+// Kill a stuck/hung ffmpeg worker and force a fresh instance next time.
+export function resetFFmpeg() {
+  try {
+    ffmpegInstance?.terminate?.();
+  } catch {
+    // ignore
+  }
+  ffmpegInstance = null;
+}
+
 async function getFFmpeg() {
   if (ffmpegInstance) return ffmpegInstance;
   await loadScript(`https://unpkg.com/@ffmpeg/ffmpeg@${FFMPEG_VER}/dist/umd/ffmpeg.js`);
