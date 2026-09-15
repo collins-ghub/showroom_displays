@@ -35,7 +35,8 @@ let ffmpegInstance: any = null;
 async function getFFmpeg() {
   if (ffmpegInstance) return ffmpegInstance;
   await loadScript(`https://unpkg.com/@ffmpeg/ffmpeg@${FFMPEG_VER}/dist/umd/ffmpeg.js`);
-  await loadScript(`https://unpkg.com/@ffmpeg/util@${UTIL_VER}/dist/umd/util.js`);
+  // NB: the util UMD bundle is published as index.js (not util.js).
+  await loadScript(`https://unpkg.com/@ffmpeg/util@${UTIL_VER}/dist/umd/index.js`);
   const { FFmpeg } = window.FFmpegWASM;
   const { toBlobURL } = window.FFmpegUtil;
   const ffmpeg = new FFmpeg();
