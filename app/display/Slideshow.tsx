@@ -24,6 +24,9 @@ const POLL_MS = 15_000;
 const EVENT_ROTATE_MS = 8_000;
 // Max time to wait for a slide's image to decode before starting its timer.
 const DECODE_WAIT_CAP_MS = 10_000;
+// If a video's playhead hasn't moved for this long, give up on it and advance
+// rather than sitting on a black screen forever.
+const VIDEO_STALL_MS = 20_000;
 
 function shuffled<T>(items: T[]): T[] {
   const a = items.slice();
@@ -49,7 +52,13 @@ export default function Slideshow({ initial }: Props) {
   // Reorder slides when shuffle is on. Re-roll each time the loop completes
   // so the order isn't the same every cycle.
   const displayImages = useMemo(() => {
-    if (!state.settings.shuffle || state.images.length < 2) return state.images;
+    // Never shuffle on the first render (epoch 0): it runs on the server too,
+    // and a different random order in the browser is a hydration mismatch
+    // (React errors #418/#423). A mount effect bumps the epoch to 1 so real
+    // shuffling starts right after hydration.
+    if (!state.settings.shuffle || state.images.length < 2 || shuffleEpoch === 0) {
+      return state.images;
+    }
     const next = shuffled(state.images);
     // Avoid an immediate repeat if the new first matches the previous last.
     if (shuffleEpoch > 0 && next[0]?.id === state.images.at(-1)?.id) {
@@ -58,6 +67,11 @@ export default function Slideshow({ initial }: Props) {
     return next;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.images, state.settings.shuffle, shuffleEpoch]);
+
+  // Start shuffling once mounted (see the displayImages memo).
+  useEffect(() => {
+    if (state.settings.shuffle) setShuffleEpoch((e) => (e === 0 ? 1 : e));
+  }, [state.settings.shuffle]);
 
   // Poll for changes; replace state when version bumps.
   useEffect(() => {
@@ -129,8 +143,14 @@ export default function Slideshow({ initial }: Props) {
   }, [index, displayImages, advance]);
 
   // Play only the active video (rewound to the start); pause the rest.
+  //
+  // A video slide normally advances on `ended`. But a video that never starts
+  // (stalled download, refused autoplay, bad file) fires neither `ended` nor
+  // `error`, which used to leave a black screen indefinitely. The watchdog
+  // below advances if the playhead stops moving for VIDEO_STALL_MS.
   useEffect(() => {
     const current = displayImages[index];
+    let watchdog: ReturnType<typeof setInterval> | undefined;
     videoRefs.current.forEach((el, id) => {
       if (current && id === current.id && isVideo(current.mime_type)) {
         try {
@@ -139,13 +159,31 @@ export default function Slideshow({ initial }: Props) {
           // some browsers throw if metadata isn't ready yet; play() still works
         }
         el.play().catch(() => {
-          // autoplay can be refused momentarily; onError/ended keep us moving
+          // autoplay can be refused momentarily; the watchdog keeps us moving
         });
+        let lastTime = -1;
+        let stuckSince = Date.now();
+        watchdog = setInterval(() => {
+          const t = el.currentTime;
+          if (t !== lastTime) {
+            lastTime = t;
+            stuckSince = Date.now();
+            return;
+          }
+          if (Date.now() - stuckSince > VIDEO_STALL_MS) {
+            // Clear first so a slow re-render can't let this fire twice.
+            if (watchdog) clearInterval(watchdog);
+            advance();
+          }
+        }, 2_000);
       } else {
         el.pause();
       }
     });
-  }, [index, displayImages]);
+    return () => {
+      if (watchdog) clearInterval(watchdog);
+    };
+  }, [index, displayImages, advance]);
 
   const events = state.settings.show_calendar ? state.events : [];
 
@@ -192,11 +230,9 @@ export default function Slideshow({ initial }: Props) {
               src={img.url}
               muted
               playsInline
-              // Only buffer the current and upcoming video. Preloading every
-              // video at once hogs bandwidth and slows the image loads.
-              preload={
-                i === index || i === (index + 1) % displayImages.length ? "auto" : "metadata"
-              }
+              // Buffer fully in the background so playback is instant when the
+              // slide comes up. (Lazier preloading stalled on Safari/Fire Stick.)
+              preload="auto"
               onEnded={advance}
               onError={() => {
                 if (displayImages[index]?.id === img.id) advance();
