@@ -14,6 +14,7 @@ type State = {
   settings: DisplaySettings;
   version: string;
   events: ShowroomEvent[];
+  build: string;
 };
 
 type Props = {
@@ -23,9 +24,14 @@ type Props = {
 const POLL_MS = 15_000;
 const EVENT_ROTATE_MS = 8_000;
 // Max time to wait for a slide's image to decode before starting its timer.
-const DECODE_WAIT_CAP_MS = 10_000;
-// If a video's playhead hasn't moved for this long, give up on it and advance
-// rather than sitting on a black screen forever.
+// Generous: on a slow showroom connection (especially while videos buffer)
+// a fresh image can take a while, and starting early cuts the slide short.
+// This is only a safety net for a truly hung download.
+const DECODE_WAIT_CAP_MS = 30_000;
+// How long a video may sit buffering before it first starts playing.
+const VIDEO_START_GRACE_MS = 60_000;
+// Once playing, if the playhead hasn't moved for this long, give up on it and
+// advance rather than sitting on a black screen forever.
 const VIDEO_STALL_MS = 20_000;
 
 function shuffled<T>(items: T[]): T[] {
@@ -82,6 +88,13 @@ export default function Slideshow({ initial }: Props) {
         if (!res.ok) return;
         const next: State = await res.json();
         if (stopped) return;
+        // A new deploy shipped. This poll only refreshes data, never the app
+        // code, so a display that's been running for days would otherwise keep
+        // executing stale JavaScript indefinitely. Reload to pick it up.
+        if (next.build && next.build !== initial.build) {
+          window.location.reload();
+          return;
+        }
         if (next.version !== versionRef.current) {
           versionRef.current = next.version;
           setState(next);
@@ -163,14 +176,19 @@ export default function Slideshow({ initial }: Props) {
         });
         let lastTime = -1;
         let stuckSince = Date.now();
+        let started = false;
         watchdog = setInterval(() => {
           const t = el.currentTime;
           if (t !== lastTime) {
+            if (t > 0) started = true;
             lastTime = t;
             stuckSince = Date.now();
             return;
           }
-          if (Date.now() - stuckSince > VIDEO_STALL_MS) {
+          // Before playback begins, allow a long grace for buffering on a slow
+          // connection; once it's playing, react quickly to a real stall.
+          const limit = started ? VIDEO_STALL_MS : VIDEO_START_GRACE_MS;
+          if (Date.now() - stuckSince > limit) {
             // Clear first so a slow re-render can't let this fire twice.
             if (watchdog) clearInterval(watchdog);
             advance();

@@ -5,6 +5,7 @@ import { withUrls } from "@/lib/images";
 import { parseSettingsRows } from "@/lib/settings";
 import type { ShowroomImage } from "@/lib/supabase/types";
 import { listTodaysEvents, type ShowroomEvent } from "@/lib/calendar";
+import { BUILD_ID } from "@/lib/build";
 import Slideshow from "./Slideshow";
 
 export const dynamic = "force-dynamic";
@@ -57,5 +58,5 @@ export default async function DisplayPage() {
       : "none";
   const version = `${dataVersion}#${eventKey}`;
 
-  return <Slideshow initial={{ images, settings, version, events }} />;
+  return <Slideshow initial={{ images, settings, version, events, build: BUILD_ID }} />;
 }

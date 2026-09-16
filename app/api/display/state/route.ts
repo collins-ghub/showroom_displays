@@ -6,6 +6,7 @@ import type { ShowroomImage } from "@/lib/supabase/types";
 import { withUrls } from "@/lib/images";
 import { parseSettingsRows } from "@/lib/settings";
 import { listTodaysEvents, type ShowroomEvent } from "@/lib/calendar";
+import { BUILD_ID } from "@/lib/build";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -75,7 +76,7 @@ export async function GET() {
   const version = `${dataVersion}#${eventKey}`;
 
   return NextResponse.json(
-    { images, settings, version, events },
+    { images, settings, version, events, build: BUILD_ID },
     { headers: { "Cache-Control": "no-store" } }
   );
 }
