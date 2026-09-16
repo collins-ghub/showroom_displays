@@ -22,6 +22,8 @@ type Props = {
 
 const POLL_MS = 15_000;
 const EVENT_ROTATE_MS = 8_000;
+// Max time to wait for a slide's image to decode before starting its timer.
+const DECODE_WAIT_CAP_MS = 10_000;
 
 function shuffled<T>(items: T[]): T[] {
   const a = items.slice();
@@ -39,6 +41,10 @@ export default function Slideshow({ initial }: Props) {
   const [shuffleEpoch, setShuffleEpoch] = useState(0);
   const versionRef = useRef(initial.version);
   const videoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
+  const imgRefs = useRef<Map<string, HTMLImageElement>>(new Map());
+  // Latest index, readable from callbacks without stale closures.
+  const indexRef = useRef(index);
+  indexRef.current = index;
 
   // Reorder slides when shuffle is on. Re-roll each time the loop completes
   // so the order isn't the same every cycle.
@@ -80,22 +86,46 @@ export default function Slideshow({ initial }: Props) {
   }, []);
 
   const advance = useCallback(() => {
-    setIndex((i) => {
-      if (displayImages.length === 0) return 0;
-      const next = (i + 1) % displayImages.length;
-      if (next === 0 && state.settings.shuffle) setShuffleEpoch((e) => e + 1);
-      return next;
-    });
+    const len = displayImages.length;
+    if (len === 0) return;
+    const next = (indexRef.current + 1) % len;
+    // Re-roll the shuffle when a full pass completes. Done here rather than
+    // inside the setIndex updater: updaters must be pure and React may run
+    // them more than once, which would double-bump the epoch.
+    if (next === 0 && state.settings.shuffle) setShuffleEpoch((e) => e + 1);
+    setIndex(next);
   }, [displayImages.length, state.settings.shuffle]);
 
   // Advance photos on their duration; videos advance when they finish playing.
+  //
+  // The clock only starts once the image is decoded and paintable. Otherwise a
+  // slow-loading slide (a freshly uploaded, uncached file on a Fire Stick)
+  // appears late and gets cut short — it "pops up" then immediately advances.
   useEffect(() => {
     if (displayImages.length === 0) return;
     const current = displayImages[index] ?? displayImages[0];
     if (isVideo(current.mime_type)) return;
     const ms = Math.max(500, current.duration_ms ?? 7000);
-    const id = setTimeout(advance, ms);
-    return () => clearTimeout(id);
+
+    let cancelled = false;
+    let id: ReturnType<typeof setTimeout> | undefined;
+    const start = () => {
+      if (!cancelled) id = setTimeout(advance, ms);
+    };
+
+    const el = imgRefs.current.get(current.id);
+    if (el && typeof el.decode === "function") {
+      // Cap the wait so a hung download can't stall the whole slideshow.
+      const cap = new Promise<void>((r) => setTimeout(r, DECODE_WAIT_CAP_MS));
+      Promise.race([el.decode().catch(() => undefined), cap]).then(start);
+    } else {
+      start();
+    }
+
+    return () => {
+      cancelled = true;
+      if (id) clearTimeout(id);
+    };
   }, [index, displayImages, advance]);
 
   // Play only the active video (rewound to the start); pause the rest.
@@ -162,7 +192,11 @@ export default function Slideshow({ initial }: Props) {
               src={img.url}
               muted
               playsInline
-              preload="auto"
+              // Only buffer the current and upcoming video. Preloading every
+              // video at once hogs bandwidth and slows the image loads.
+              preload={
+                i === index || i === (index + 1) % displayImages.length ? "auto" : "metadata"
+              }
               onEnded={advance}
               onError={() => {
                 if (displayImages[index]?.id === img.id) advance();
@@ -182,6 +216,10 @@ export default function Slideshow({ initial }: Props) {
               {/* Foreground: full image, no cropping */}
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
+                ref={(el) => {
+                  if (el) imgRefs.current.set(img.id, el);
+                  else imgRefs.current.delete(img.id);
+                }}
                 src={img.url}
                 alt=""
                 className="absolute inset-0 w-full h-full object-contain"
