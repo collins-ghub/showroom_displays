@@ -9,6 +9,11 @@ function isVideo(mime: string | null | undefined): boolean {
   return !!mime && mime.startsWith("video/");
 }
 
+// Has the video buffered enough to start playing? (HAVE_FUTURE_DATA or better)
+function videoReady(el: HTMLVideoElement | undefined): boolean {
+  return !!el && el.readyState >= 3;
+}
+
 type State = {
   images: ImageWithUrl[];
   settings: DisplaySettings;
@@ -33,6 +38,8 @@ const VIDEO_START_GRACE_MS = 60_000;
 // Once playing, if the playhead hasn't moved for this long, give up on it and
 // advance rather than sitting on a black screen forever.
 const VIDEO_STALL_MS = 20_000;
+// Background video buffering queue: max wait per video before moving on.
+const VIDEO_LOAD_TIMEOUT_MS = 90_000;
 
 function shuffled<T>(items: T[]): T[] {
   const a = items.slice();
@@ -115,13 +122,23 @@ export default function Slideshow({ initial }: Props) {
   const advance = useCallback(() => {
     const len = displayImages.length;
     if (len === 0) return;
-    const next = (indexRef.current + 1) % len;
-    // Re-roll the shuffle when a full pass completes. Done here rather than
-    // inside the setIndex updater: updaters must be pure and React may run
-    // them more than once, which would double-bump the epoch.
-    if (next === 0 && state.settings.shuffle) setShuffleEpoch((e) => e + 1);
+    const from = indexRef.current;
+    let next = (from + 1) % len;
+    // Skip videos that haven't buffered enough to play yet (typical right after
+    // a cold start on a slow connection, e.g. a screensaver that relaunches the
+    // page). They rejoin the rotation once ready. Bounded so we always land
+    // somewhere even if every slide is an unready video.
+    for (let step = 0; step < len; step++) {
+      const cand = displayImages[next];
+      if (!isVideo(cand.mime_type) || videoReady(videoRefs.current.get(cand.id))) break;
+      next = (next + 1) % len;
+    }
+    // Re-roll the shuffle when a full pass completes (we wrapped around). Done
+    // here rather than inside the setIndex updater: updaters must be pure and
+    // React may run them more than once, which would double-bump the epoch.
+    if (next <= from && state.settings.shuffle) setShuffleEpoch((e) => e + 1);
     setIndex(next);
-  }, [displayImages.length, state.settings.shuffle]);
+  }, [displayImages, state.settings.shuffle]);
 
   // Advance photos on their duration; videos advance when they finish playing.
   //
@@ -163,6 +180,21 @@ export default function Slideshow({ initial }: Props) {
   // below advances if the playhead stops moving for VIDEO_STALL_MS.
   useEffect(() => {
     const current = displayImages[index];
+    // If the current slide is a video that isn't ready and something else is,
+    // don't sit on a black frame — move on. Covers mount and poll resets, where
+    // the index lands on a slide without going through advance().
+    if (current && isVideo(current.mime_type)) {
+      const el = videoRefs.current.get(current.id);
+      if (!videoReady(el)) {
+        const anyReady = displayImages.some(
+          (s) => !isVideo(s.mime_type) || videoReady(videoRefs.current.get(s.id))
+        );
+        if (anyReady) {
+          advance();
+          return;
+        }
+      }
+    }
     let watchdog: ReturnType<typeof setInterval> | undefined;
     videoRefs.current.forEach((el, id) => {
       if (current && id === current.id && isVideo(current.mime_type)) {
@@ -202,6 +234,53 @@ export default function Slideshow({ initial }: Props) {
       if (watchdog) clearInterval(watchdog);
     };
   }, [index, displayImages, advance]);
+
+  // Buffer videos in the background one at a time, soonest-needed first, so a
+  // cold start doesn't download every video at once and starve the images.
+  useEffect(() => {
+    const len = displayImages.length;
+    const queue: ImageWithUrl[] = [];
+    for (let k = 1; k <= len; k++) {
+      const s = displayImages[(indexRef.current + k) % len];
+      if (s && isVideo(s.mime_type)) queue.push(s);
+    }
+    if (queue.length === 0) return;
+
+    let cancelled = false;
+    let cleanupCurrent: (() => void) | undefined;
+    const loadNext = () => {
+      if (cancelled) return;
+      const slide = queue.shift();
+      if (!slide) return;
+      const el = videoRefs.current.get(slide.id);
+      if (!el || el.readyState >= 4) {
+        loadNext();
+        return;
+      }
+      const done = () => {
+        el.removeEventListener("canplaythrough", done);
+        clearTimeout(timer);
+        cleanupCurrent = undefined;
+        loadNext();
+      };
+      const timer = setTimeout(done, VIDEO_LOAD_TIMEOUT_MS);
+      cleanupCurrent = () => {
+        el.removeEventListener("canplaythrough", done);
+        clearTimeout(timer);
+      };
+      el.addEventListener("canplaythrough", done);
+      // The active video is already being fetched by play(); don't reset it.
+      if (displayImages[indexRef.current]?.id !== slide.id) {
+        el.preload = "auto";
+        el.load();
+      }
+    };
+    loadNext();
+    return () => {
+      cancelled = true;
+      cleanupCurrent?.();
+    };
+  }, [displayImages]);
 
   const events = state.settings.show_calendar ? state.events : [];
 
@@ -248,9 +327,10 @@ export default function Slideshow({ initial }: Props) {
               src={img.url}
               muted
               playsInline
-              // Buffer fully in the background so playback is instant when the
-              // slide comes up. (Lazier preloading stalled on Safari/Fire Stick.)
-              preload="auto"
+              // Only metadata up front so images win the bandwidth race on a
+              // cold start; a background queue then buffers videos one at a
+              // time, and unready videos are skipped rather than shown black.
+              preload="metadata"
               onEnded={advance}
               onError={() => {
                 if (displayImages[index]?.id === img.id) advance();
