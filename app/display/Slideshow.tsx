@@ -9,9 +9,12 @@ function isVideo(mime: string | null | undefined): boolean {
   return !!mime && mime.startsWith("video/");
 }
 
-// Has the video buffered enough to start playing? (HAVE_FUTURE_DATA or better)
+// Is the video buffered well enough to play through without stalling?
+// HAVE_ENOUGH_DATA: the browser estimates it can reach the end at the current
+// download rate. Anything less risks starting, freezing mid-play, and getting
+// cut off by the stall watchdog.
 function videoReady(el: HTMLVideoElement | undefined): boolean {
-  return !!el && el.readyState >= 3;
+  return !!el && el.readyState >= 4;
 }
 
 type State = {
@@ -61,6 +64,15 @@ export default function Slideshow({ initial }: Props) {
   // Latest index, readable from callbacks without stale closures.
   const indexRef = useRef(index);
   indexRef.current = index;
+  // Shuffle order (ids) for the current pass, kept stable while the image
+  // list changes underneath us. See the displayImages memo.
+  const orderRef = useRef<string[]>([]);
+  const orderEpochRef = useRef(-1);
+  // Id of the slide we're showing, so a data refresh can keep it on screen
+  // instead of jumping back to the first slide.
+  const currentIdRef = useRef<string | null>(null);
+  // Id of the video currently playing, so a data refresh doesn't rewind it.
+  const playingIdRef = useRef<string | null>(null);
 
   // Reorder slides when shuffle is on. Re-roll each time the loop completes
   // so the order isn't the same every cycle.
@@ -72,12 +84,28 @@ export default function Slideshow({ initial }: Props) {
     if (!state.settings.shuffle || state.images.length < 2 || shuffleEpoch === 0) {
       return state.images;
     }
-    const next = shuffled(state.images);
-    // Avoid an immediate repeat if the new first matches the previous last.
-    if (shuffleEpoch > 0 && next[0]?.id === state.images.at(-1)?.id) {
-      [next[0], next[1]] = [next[1], next[0]];
+    const byId = new Map(state.images.map((i) => [i.id, i] as const));
+    let order: string[];
+    if (orderEpochRef.current !== shuffleEpoch) {
+      // A new pass: fresh random order.
+      order = shuffled(state.images.map((i) => i.id));
+      // Avoid an immediate repeat of the slide that closed out the last pass.
+      const lastShown = orderRef.current.at(-1);
+      if (order.length > 1 && lastShown && order[0] === lastShown) {
+        [order[0], order[1]] = [order[1], order[0]];
+      }
+      orderEpochRef.current = shuffleEpoch;
+    } else {
+      // Same pass, but the image list changed (upload / removal / toggle).
+      // Keep the existing order so the slide on screen doesn't move, drop ids
+      // that are gone, and append the new ones (they'll show later this pass).
+      order = orderRef.current.filter((id) => byId.has(id));
+      const known = new Set(order);
+      const fresh = state.images.filter((i) => !known.has(i.id)).map((i) => i.id);
+      order = [...order, ...shuffled(fresh)];
     }
-    return next;
+    orderRef.current = order;
+    return order.map((id) => byId.get(id)!);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.images, state.settings.shuffle, shuffleEpoch]);
 
@@ -104,8 +132,9 @@ export default function Slideshow({ initial }: Props) {
         }
         if (next.version !== versionRef.current) {
           versionRef.current = next.version;
+          // Don't reset the slide index: the current slide stays on screen and
+          // the list is merged underneath it (see the re-sync effect below).
           setState(next);
-          setIndex(0);
           setEventIndex(0);
         }
       } catch {
@@ -136,9 +165,31 @@ export default function Slideshow({ initial }: Props) {
     // Re-roll the shuffle when a full pass completes (we wrapped around). Done
     // here rather than inside the setIndex updater: updaters must be pure and
     // React may run them more than once, which would double-bump the epoch.
-    if (next <= from && state.settings.shuffle) setShuffleEpoch((e) => e + 1);
+    const wrapped = next <= from;
+    if (wrapped && state.settings.shuffle) setShuffleEpoch((e) => e + 1);
+    // Record the intended slide so the re-sync effect doesn't fight this move.
+    // On a shuffle re-roll the new order isn't known yet, so leave it unset.
+    currentIdRef.current =
+      wrapped && state.settings.shuffle ? null : (displayImages[next]?.id ?? null);
     setIndex(next);
   }, [displayImages, state.settings.shuffle]);
+
+  // If the slide list changed underneath us (upload, removal, calendar), keep
+  // showing the same slide rather than jumping back to the first one. If the
+  // slide we were on is gone, fall back to the first.
+  useEffect(() => {
+    const id = currentIdRef.current;
+    if (!id) return;
+    const pos = displayImages.findIndex((s) => s.id === id);
+    if (pos < 0) setIndex(0);
+    else if (pos !== indexRef.current) setIndex(pos);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [displayImages]);
+
+  // Track which slide is on screen (after any re-sync above).
+  useEffect(() => {
+    currentIdRef.current = displayImages[index]?.id ?? null;
+  }, [index, displayImages]);
 
   // Advance photos on their duration; videos advance when they finish playing.
   //
@@ -198,10 +249,15 @@ export default function Slideshow({ initial }: Props) {
     let watchdog: ReturnType<typeof setInterval> | undefined;
     videoRefs.current.forEach((el, id) => {
       if (current && id === current.id && isVideo(current.mime_type)) {
-        try {
-          el.currentTime = 0;
-        } catch {
-          // some browsers throw if metadata isn't ready yet; play() still works
+        // Only rewind when this video is newly on screen. This effect also
+        // re-runs when the slide list refreshes mid-play; don't restart it then.
+        if (playingIdRef.current !== current.id) {
+          try {
+            el.currentTime = 0;
+          } catch {
+            // some browsers throw if metadata isn't ready yet; play() still works
+          }
+          playingIdRef.current = current.id;
         }
         el.play().catch(() => {
           // autoplay can be refused momentarily; the watchdog keeps us moving
@@ -228,6 +284,7 @@ export default function Slideshow({ initial }: Props) {
         }, 2_000);
       } else {
         el.pause();
+        if (playingIdRef.current === id) playingIdRef.current = null;
       }
     });
     return () => {
