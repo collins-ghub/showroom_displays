@@ -31,11 +31,14 @@ type Props = {
 
 const POLL_MS = 15_000;
 const EVENT_ROTATE_MS = 8_000;
-// Max time to wait for a slide's image to decode before starting its timer.
-// Generous: on a slow showroom connection (especially while videos buffer)
-// a fresh image can take a while, and starting early cuts the slide short.
-// This is only a safety net for a truly hung download.
-const DECODE_WAIT_CAP_MS = 30_000;
+// Max time to wait for a slide's image to finish loading before starting its
+// timer. Generous: on a slow showroom connection (especially while videos
+// buffer) a fresh image can take a while, and starting early cuts the slide
+// short. Only a safety net for a truly hung download.
+const IMAGE_LOAD_CAP_MS = 30_000;
+// Once loaded, how long to give the browser to decode before starting the
+// timer regardless (decode() misbehaves in some embedded browsers).
+const DECODE_CAP_MS = 3_000;
 // How long a video may sit buffering before it first starts playing.
 const VIDEO_START_GRACE_MS = 60_000;
 // Once playing, if the playhead hasn't moved for this long, give up on it and
@@ -53,27 +56,51 @@ function shuffled<T>(items: T[]): T[] {
   return a;
 }
 
+// Position of the next slide after `fromPos` that can be shown right now: any
+// image, or a video that has buffered enough. Bounded so we always land
+// somewhere even if every other slide is an unready video.
+function nextShowable(
+  list: ImageWithUrl[],
+  fromPos: number,
+  videos: Map<string, HTMLVideoElement>
+): number {
+  const len = list.length;
+  let next = (fromPos + 1) % len;
+  for (let step = 0; step < len; step++) {
+    const cand = list[next];
+    if (!isVideo(cand.mime_type) || videoReady(videos.get(cand.id))) break;
+    next = (next + 1) % len;
+  }
+  return next;
+}
+
 export default function Slideshow({ initial }: Props) {
   const [state, setState] = useState<State>(initial);
-  const [index, setIndex] = useState(0);
+  // The slide on screen, by id rather than by position. Reshuffles and list
+  // refreshes can reorder the deck underneath us without ever changing what's
+  // visible; only an explicit move does that.
+  const [currentId, setCurrentId] = useState<string | null>(initial.images[0]?.id ?? null);
+  // Bumped to re-arm the current slide's timer when a move lands back on the
+  // same slide (everything else was an unready video).
+  const [tick, setTick] = useState(0);
   const [eventIndex, setEventIndex] = useState(0);
   const [shuffleEpoch, setShuffleEpoch] = useState(0);
   const versionRef = useRef(initial.version);
   const videoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
   const imgRefs = useRef<Map<string, HTMLImageElement>>(new Map());
-  // Latest index, readable from callbacks without stale closures.
-  const indexRef = useRef(index);
-  indexRef.current = index;
+  // Latest visible id, readable from callbacks without stale closures.
+  const currentIdRef = useRef(currentId);
+  currentIdRef.current = currentId;
   // Shuffle order (ids) for the current pass, kept stable while the image
   // list changes underneath us. See the displayImages memo.
   const orderRef = useRef<string[]>([]);
   const orderEpochRef = useRef(-1);
-  // Id of the slide we're showing, so a data refresh can keep it on screen
-  // instead of jumping back to the first slide.
-  const currentIdRef = useRef<string | null>(null);
-  // Id of the video currently playing, so a data refresh doesn't rewind it.
+  // Set when a pass completes. The deck effect starts the next pass once the
+  // reshuffled order exists; until then further moves are ignored.
+  const newPassRef = useRef(false);
+  // Id of the video currently playing, so a refresh doesn't rewind it.
   const playingIdRef = useRef<string | null>(null);
-  // A slide to jump to once the list has settled: carried across a reload in
+  // A slide to jump to once the deck has settled: carried across a reload in
   // the URL (?s=<id>) so a self-update is invisible, or a random start when
   // shuffling so a relaunch (screensaver) doesn't always open on slide one.
   // Read here rather than in an effect so it's known before the first effects
@@ -120,6 +147,10 @@ export default function Slideshow({ initial }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.images, state.settings.shuffle, shuffleEpoch]);
 
+  const currentSlide = currentId
+    ? (displayImages.find((s) => s.id === currentId) ?? null)
+    : null;
+
   // Start shuffling once mounted (see the displayImages memo). Also pick a
   // random starting slide unless one was carried in the URL.
   useEffect(() => {
@@ -135,7 +166,7 @@ export default function Slideshow({ initial }: Props) {
   // Poll for changes; replace state when version bumps.
   useEffect(() => {
     let stopped = false;
-    async function tick() {
+    async function tickPoll() {
       try {
         const res = await fetch("/api/display/state", { cache: "no-store" });
         if (!res.ok) return;
@@ -159,8 +190,8 @@ export default function Slideshow({ initial }: Props) {
         }
         if (next.version !== versionRef.current) {
           versionRef.current = next.version;
-          // Don't reset the slide index: the current slide stays on screen and
-          // the list is merged underneath it (see the re-sync effect below).
+          // The visible slide is tracked by id, so replacing the list never
+          // changes what's on screen (see the deck effect below).
           setState(next);
           setEventIndex(0);
         }
@@ -168,173 +199,217 @@ export default function Slideshow({ initial }: Props) {
         // Fire Sticks lose Wi-Fi sometimes; just try again next interval.
       }
     }
-    const id = setInterval(tick, POLL_MS);
+    const id = setInterval(tickPoll, POLL_MS);
     return () => {
       stopped = true;
       clearInterval(id);
     };
   }, []);
 
-  const advance = useCallback(() => {
-    const len = displayImages.length;
-    if (len === 0) return;
-    const from = indexRef.current;
-    let next = (from + 1) % len;
-    // Skip videos that haven't buffered enough to play yet (typical right after
-    // a cold start on a slow connection, e.g. a screensaver that relaunches the
-    // page). They rejoin the rotation once ready. Bounded so we always land
-    // somewhere even if every slide is an unready video.
-    for (let step = 0; step < len; step++) {
-      const cand = displayImages[next];
-      if (!isVideo(cand.mime_type) || videoReady(videoRefs.current.get(cand.id))) break;
-      next = (next + 1) % len;
-    }
-    // Re-roll the shuffle when a full pass completes (we wrapped around). Done
-    // here rather than inside the setIndex updater: updaters must be pure and
-    // React may run them more than once, which would double-bump the epoch.
-    const wrapped = next <= from;
-    if (wrapped && state.settings.shuffle) setShuffleEpoch((e) => e + 1);
-    setIndex(next);
-  }, [displayImages, state.settings.shuffle]);
+  // Move on from `fromId`. Guarded so that only the slide actually on screen
+  // can advance the show: a late timer, a non-current video's `ended`, or a
+  // stale stall-watchdog is ignored instead of skipping a slide.
+  const advanceFrom = useCallback(
+    (fromId: string | null) => {
+      if (newPassRef.current || fromId !== currentIdRef.current) return;
+      const list = displayImages;
+      const len = list.length;
+      if (len === 0) return;
+      const pos = Math.max(0, list.findIndex((s) => s.id === fromId));
+      const next = nextShowable(list, pos, videoRefs.current);
+      if (next <= pos && state.settings.shuffle && len > 1) {
+        // Pass complete: re-roll the order. The deck effect starts the new
+        // pass once the reshuffled order exists; until then the current slide
+        // simply stays up, so there's no stray frame of some other slide.
+        newPassRef.current = true;
+        setShuffleEpoch((e) => e + 1);
+        return;
+      }
+      const nextId = list[next].id;
+      if (nextId === fromId) {
+        setTick((t) => t + 1);
+      } else {
+        // Update the ref eagerly so a second call before React re-renders
+        // (timer and `ended` in the same instant, say) can't double-advance.
+        currentIdRef.current = nextId;
+        setCurrentId(nextId);
+      }
+    },
+    [displayImages, state.settings.shuffle]
+  );
+  const advanceRef = useRef(advanceFrom);
+  advanceRef.current = advanceFrom;
 
-  // Track which slide is on screen. Depends on index only: when the list
-  // changes underneath us the re-sync below must still see the id of the
-  // slide we were showing, not whatever now sits at the same position.
+  // When the deck changes (refresh, reshuffle): apply a pending target, start
+  // a new pass, or recover if the visible slide vanished. Otherwise leave the
+  // visible slide exactly where it is.
   useEffect(() => {
-    currentIdRef.current = displayImages[index]?.id ?? null;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [index]);
-
-  // When the slide list changes (upload, removal, calendar, shuffle re-roll)
-  // keep showing the same slide rather than jumping back to the first one —
-  // or, if a target slide is pending (from the URL or a random start), go
-  // there. If the slide we were on is gone, fall back to the first.
-  useEffect(() => {
+    const list = displayImages;
+    if (list.length === 0) return;
     // With shuffle on, the very first list is the unshuffled server order and
     // is about to be replaced; wait for the shuffled one before positioning.
     if (state.settings.shuffle && shuffleEpoch === 0) return;
-    const target = pendingIdRef.current ?? currentIdRef.current;
-    if (!target) return;
-    const pos = displayImages.findIndex((s) => s.id === target);
-    if (pos >= 0) {
+    const showable = (id: string | null) => {
+      if (!id) return false;
+      const s = list.find((x) => x.id === id);
+      return !!s && (!isVideo(s.mime_type) || videoReady(videoRefs.current.get(s.id)));
+    };
+    const go = (id: string) => {
+      if (id === currentIdRef.current) {
+        setTick((t) => t + 1);
+      } else {
+        currentIdRef.current = id;
+        setCurrentId(id);
+      }
+    };
+    if (pendingIdRef.current) {
+      const p = pendingIdRef.current;
       pendingIdRef.current = null;
-      if (pos !== indexRef.current) setIndex(pos);
-    } else if (pendingIdRef.current) {
-      pendingIdRef.current = null; // stale/unknown target; ignore it
-    } else {
-      setIndex(0);
+      if (showable(p)) {
+        go(p);
+        return;
+      }
+    }
+    if (newPassRef.current) {
+      newPassRef.current = false;
+      go(list[nextShowable(list, list.length - 1, videoRefs.current)].id);
+      return;
+    }
+    if (!list.some((s) => s.id === currentIdRef.current)) {
+      go(list[nextShowable(list, list.length - 1, videoRefs.current)].id);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [displayImages]);
 
   // Advance photos on their duration; videos advance when they finish playing.
   //
-  // The clock only starts once the image is decoded and paintable. Otherwise a
-  // slow-loading slide (a freshly uploaded, uncached file on a Fire Stick)
-  // appears late and gets cut short — it "pops up" then immediately advances.
+  // The clock only starts once the image has loaded (and had a moment to
+  // decode). Otherwise a slow-loading slide appears late and gets cut short —
+  // it "pops up" then immediately advances. Keyed on the visible slide only,
+  // so a list refresh mid-slide doesn't restart the clock.
   useEffect(() => {
-    if (displayImages.length === 0) return;
-    const current = displayImages[index] ?? displayImages[0];
-    if (isVideo(current.mime_type)) return;
-    const ms = Math.max(500, current.duration_ms ?? 7000);
+    const slide = currentSlide;
+    if (!slide || isVideo(slide.mime_type)) return;
+    const id = slide.id;
+    const ms = Math.max(500, slide.duration_ms ?? 7000);
+    const el = imgRefs.current.get(id);
 
     let cancelled = false;
-    let id: ReturnType<typeof setTimeout> | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const caps: ReturnType<typeof setTimeout>[] = [];
     const start = () => {
-      if (!cancelled) id = setTimeout(advance, ms);
+      if (cancelled || timer) return;
+      timer = setTimeout(() => advanceRef.current(id), ms);
     };
-
-    const el = imgRefs.current.get(current.id);
-    if (el && typeof el.decode === "function") {
-      // Cap the wait so a hung download can't stall the whole slideshow.
-      const cap = new Promise<void>((r) => setTimeout(r, DECODE_WAIT_CAP_MS));
-      Promise.race([el.decode().catch(() => undefined), cap]).then(start);
+    // Loaded: give the browser a moment to decode so the first paint isn't
+    // late on a slow machine, then start the clock. decode() is capped and
+    // optional — some embedded browsers reject or never settle it.
+    const onLoaded = () => {
+      if (cancelled) return;
+      if (el && typeof el.decode === "function") {
+        caps.push(setTimeout(start, DECODE_CAP_MS));
+        el.decode().then(start, start);
+      } else {
+        start();
+      }
+    };
+    // `complete` is true once the fetch finished, whether it succeeded or not.
+    if (!el || el.complete) {
+      onLoaded();
     } else {
-      start();
+      el.addEventListener("load", onLoaded, { once: true });
+      el.addEventListener("error", onLoaded, { once: true });
+      caps.push(setTimeout(start, IMAGE_LOAD_CAP_MS));
     }
-
     return () => {
       cancelled = true;
-      if (id) clearTimeout(id);
+      if (timer) clearTimeout(timer);
+      caps.forEach((c) => clearTimeout(c));
+      el?.removeEventListener("load", onLoaded);
+      el?.removeEventListener("error", onLoaded);
     };
-  }, [index, displayImages, advance]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentId, tick]);
 
-  // Play only the active video (rewound to the start); pause the rest.
+  // Play only the visible video (rewound to the start); pause the rest.
   //
   // A video slide normally advances on `ended`. But a video that never starts
   // (stalled download, refused autoplay, bad file) fires neither `ended` nor
-  // `error`, which used to leave a black screen indefinitely. The watchdog
-  // below advances if the playhead stops moving for VIDEO_STALL_MS.
+  // `error`, which would leave a black screen indefinitely. The watchdog
+  // below advances if the playhead stops moving. Keyed on the visible slide
+  // only, so a list refresh mid-play neither restarts nor re-evaluates it.
   useEffect(() => {
-    const current = displayImages[index];
-    // If the current slide is a video that isn't ready and something else is,
-    // don't sit on a black frame — move on. Covers mount and poll resets, where
-    // the index lands on a slide without going through advance().
-    if (current && isVideo(current.mime_type)) {
-      const el = videoRefs.current.get(current.id);
-      if (!videoReady(el)) {
-        const anyReady = displayImages.some(
-          (s) => !isVideo(s.mime_type) || videoReady(videoRefs.current.get(s.id))
-        );
-        if (anyReady) {
-          advance();
-          return;
-        }
-      }
-    }
-    let watchdog: ReturnType<typeof setInterval> | undefined;
+    const slide = currentSlide;
     videoRefs.current.forEach((el, id) => {
-      if (current && id === current.id && isVideo(current.mime_type)) {
-        // Only rewind when this video is newly on screen. This effect also
-        // re-runs when the slide list refreshes mid-play; don't restart it then.
-        if (playingIdRef.current !== current.id) {
-          try {
-            el.currentTime = 0;
-          } catch {
-            // some browsers throw if metadata isn't ready yet; play() still works
-          }
-          playingIdRef.current = current.id;
-        }
-        el.play().catch(() => {
-          // autoplay can be refused momentarily; the watchdog keeps us moving
-        });
-        let lastTime = -1;
-        let stuckSince = Date.now();
-        let started = false;
-        watchdog = setInterval(() => {
-          const t = el.currentTime;
-          if (t !== lastTime) {
-            if (t > 0) started = true;
-            lastTime = t;
-            stuckSince = Date.now();
-            return;
-          }
-          // Before playback begins, allow a long grace for buffering on a slow
-          // connection; once it's playing, react quickly to a real stall.
-          const limit = started ? VIDEO_STALL_MS : VIDEO_START_GRACE_MS;
-          if (Date.now() - stuckSince > limit) {
-            // Clear first so a slow re-render can't let this fire twice.
-            if (watchdog) clearInterval(watchdog);
-            advance();
-          }
-        }, 2_000);
-      } else {
+      if (!slide || id !== slide.id) {
         el.pause();
         if (playingIdRef.current === id) playingIdRef.current = null;
       }
     });
-    return () => {
-      if (watchdog) clearInterval(watchdog);
-    };
-  }, [index, displayImages, advance]);
+    if (!slide || !isVideo(slide.mime_type)) return;
+    const id = slide.id;
+    const el = videoRefs.current.get(id);
+    if (!el) return;
+
+    // Not buffered enough and not already playing: don't sit on a black
+    // frame — move on if anything else can be shown. (Covers a reload or a
+    // pending target landing on a video that isn't ready yet.)
+    if (playingIdRef.current !== id && !videoReady(el)) {
+      const anyOther = displayImages.some(
+        (s) => s.id !== id && (!isVideo(s.mime_type) || videoReady(videoRefs.current.get(s.id)))
+      );
+      if (anyOther) {
+        advanceRef.current(id);
+        return;
+      }
+    }
+
+    // Only rewind when this video is newly on screen.
+    if (playingIdRef.current !== id) {
+      try {
+        el.currentTime = 0;
+      } catch {
+        // some browsers throw if metadata isn't ready yet; play() still works
+      }
+      playingIdRef.current = id;
+    }
+    el.play().catch(() => {
+      // autoplay can be refused momentarily; the watchdog keeps us moving
+    });
+
+    let lastTime = -1;
+    let stuckSince = Date.now();
+    let started = false;
+    const watchdog = setInterval(() => {
+      const t = el.currentTime;
+      if (t !== lastTime) {
+        if (t > 0) started = true;
+        lastTime = t;
+        stuckSince = Date.now();
+        return;
+      }
+      // Before playback begins, allow a long grace for buffering on a slow
+      // connection; once it's playing, react quickly to a real stall.
+      const limit = started ? VIDEO_STALL_MS : VIDEO_START_GRACE_MS;
+      if (Date.now() - stuckSince > limit) {
+        clearInterval(watchdog);
+        advanceRef.current(id);
+      }
+    }, 2_000);
+    return () => clearInterval(watchdog);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentId, tick]);
 
   // Buffer videos in the background one at a time, soonest-needed first, so a
   // cold start doesn't download every video at once and starve the images.
   useEffect(() => {
-    const len = displayImages.length;
+    const list = displayImages;
+    const len = list.length;
+    if (len === 0) return;
+    const pos = Math.max(0, list.findIndex((s) => s.id === currentIdRef.current));
     const queue: ImageWithUrl[] = [];
     for (let k = 1; k <= len; k++) {
-      const s = displayImages[(indexRef.current + k) % len];
+      const s = list[(pos + k) % len];
       if (s && isVideo(s.mime_type)) queue.push(s);
     }
     if (queue.length === 0) return;
@@ -362,14 +437,11 @@ export default function Slideshow({ initial }: Props) {
         clearTimeout(timer);
       };
       el.addEventListener("canplaythrough", done);
-      // Kick off buffering once. The active video is already being fetched by
-      // play(), and load() on a video that's mid-download would throw away
+      // Kick off buffering once. The visible video is already being fetched
+      // by play(), and load() on a video that's mid-download would throw away
       // everything it had and start over — which on a slow link meant some
       // videos never reached "ready" at all.
-      if (
-        displayImages[indexRef.current]?.id !== slide.id &&
-        !startedLoadsRef.current.has(slide.id)
-      ) {
+      if (slide.id !== currentIdRef.current && !startedLoadsRef.current.has(slide.id)) {
         startedLoadsRef.current.add(slide.id);
         el.preload = "auto";
         el.load();
@@ -412,11 +484,11 @@ export default function Slideshow({ initial }: Props) {
 
   return (
     <div className="fixed inset-0 bg-black overflow-hidden">
-      {displayImages.map((img, i) => (
+      {displayImages.map((img) => (
         <div
           key={img.id}
           className="absolute inset-0 transition-opacity duration-1000 ease-in-out"
-          style={{ opacity: i === index ? 1 : 0 }}
+          style={{ opacity: img.id === currentId ? 1 : 0 }}
         >
           {isVideo(img.mime_type) ? (
             <video
@@ -431,10 +503,10 @@ export default function Slideshow({ initial }: Props) {
               // cold start; a background queue then buffers videos one at a
               // time, and unready videos are skipped rather than shown black.
               preload="metadata"
-              onEnded={advance}
-              onError={() => {
-                if (displayImages[index]?.id === img.id) advance();
-              }}
+              // advanceFrom ignores these unless this video is the one on
+              // screen, so a non-current video finishing can't skip a slide.
+              onEnded={() => advanceRef.current(img.id)}
+              onError={() => advanceRef.current(img.id)}
               className="absolute inset-0 w-full h-full object-contain"
             />
           ) : (
