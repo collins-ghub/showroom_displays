@@ -73,6 +73,17 @@ export default function Slideshow({ initial }: Props) {
   const currentIdRef = useRef<string | null>(null);
   // Id of the video currently playing, so a data refresh doesn't rewind it.
   const playingIdRef = useRef<string | null>(null);
+  // A slide to jump to once the list has settled: carried across a reload in
+  // the URL (?s=<id>) so a self-update is invisible, or a random start when
+  // shuffling so a relaunch (screensaver) doesn't always open on slide one.
+  // Read here rather than in an effect so it's known before the first effects
+  // run; it never affects rendered output, so hydration is unaffected.
+  const pendingIdRef = useRef<string | null>(
+    typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("s")
+  );
+  // Videos we've already asked the browser to buffer. load() resets an element
+  // and discards what it had, so never call it twice on the same video.
+  const startedLoadsRef = useRef<Set<string>>(new Set());
 
   // Reorder slides when shuffle is on. Re-roll each time the loop completes
   // so the order isn't the same every cycle.
@@ -109,9 +120,16 @@ export default function Slideshow({ initial }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.images, state.settings.shuffle, shuffleEpoch]);
 
-  // Start shuffling once mounted (see the displayImages memo).
+  // Start shuffling once mounted (see the displayImages memo). Also pick a
+  // random starting slide unless one was carried in the URL.
   useEffect(() => {
-    if (state.settings.shuffle) setShuffleEpoch((e) => (e === 0 ? 1 : e));
+    if (!state.settings.shuffle) return;
+    if (!pendingIdRef.current && state.images.length > 1) {
+      const pick = state.images[Math.floor(Math.random() * state.images.length)];
+      pendingIdRef.current = pick?.id ?? null;
+    }
+    setShuffleEpoch((e) => (e === 0 ? 1 : e));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.settings.shuffle]);
 
   // Poll for changes; replace state when version bumps.
@@ -127,7 +145,16 @@ export default function Slideshow({ initial }: Props) {
         // code, so a display that's been running for days would otherwise keep
         // executing stale JavaScript indefinitely. Reload to pick it up.
         if (next.build && next.build !== initial.build) {
-          window.location.reload();
+          // Reload via a cache-busting URL, once per new build, carrying the
+          // current slide so the update is invisible. The once-per-build guard
+          // prevents a loop if an embedded browser keeps serving cached HTML.
+          const url = new URL(window.location.href);
+          if (url.searchParams.get("b") === next.build) return;
+          url.searchParams.set("b", next.build);
+          const cur = currentIdRef.current;
+          if (cur) url.searchParams.set("s", cur);
+          else url.searchParams.delete("s");
+          window.location.replace(url.toString());
           return;
         }
         if (next.version !== versionRef.current) {
@@ -167,29 +194,38 @@ export default function Slideshow({ initial }: Props) {
     // React may run them more than once, which would double-bump the epoch.
     const wrapped = next <= from;
     if (wrapped && state.settings.shuffle) setShuffleEpoch((e) => e + 1);
-    // Record the intended slide so the re-sync effect doesn't fight this move.
-    // On a shuffle re-roll the new order isn't known yet, so leave it unset.
-    currentIdRef.current =
-      wrapped && state.settings.shuffle ? null : (displayImages[next]?.id ?? null);
     setIndex(next);
   }, [displayImages, state.settings.shuffle]);
 
-  // If the slide list changed underneath us (upload, removal, calendar), keep
-  // showing the same slide rather than jumping back to the first one. If the
-  // slide we were on is gone, fall back to the first.
-  useEffect(() => {
-    const id = currentIdRef.current;
-    if (!id) return;
-    const pos = displayImages.findIndex((s) => s.id === id);
-    if (pos < 0) setIndex(0);
-    else if (pos !== indexRef.current) setIndex(pos);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [displayImages]);
-
-  // Track which slide is on screen (after any re-sync above).
+  // Track which slide is on screen. Depends on index only: when the list
+  // changes underneath us the re-sync below must still see the id of the
+  // slide we were showing, not whatever now sits at the same position.
   useEffect(() => {
     currentIdRef.current = displayImages[index]?.id ?? null;
-  }, [index, displayImages]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [index]);
+
+  // When the slide list changes (upload, removal, calendar, shuffle re-roll)
+  // keep showing the same slide rather than jumping back to the first one —
+  // or, if a target slide is pending (from the URL or a random start), go
+  // there. If the slide we were on is gone, fall back to the first.
+  useEffect(() => {
+    // With shuffle on, the very first list is the unshuffled server order and
+    // is about to be replaced; wait for the shuffled one before positioning.
+    if (state.settings.shuffle && shuffleEpoch === 0) return;
+    const target = pendingIdRef.current ?? currentIdRef.current;
+    if (!target) return;
+    const pos = displayImages.findIndex((s) => s.id === target);
+    if (pos >= 0) {
+      pendingIdRef.current = null;
+      if (pos !== indexRef.current) setIndex(pos);
+    } else if (pendingIdRef.current) {
+      pendingIdRef.current = null; // stale/unknown target; ignore it
+    } else {
+      setIndex(0);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [displayImages]);
 
   // Advance photos on their duration; videos advance when they finish playing.
   //
@@ -326,8 +362,15 @@ export default function Slideshow({ initial }: Props) {
         clearTimeout(timer);
       };
       el.addEventListener("canplaythrough", done);
-      // The active video is already being fetched by play(); don't reset it.
-      if (displayImages[indexRef.current]?.id !== slide.id) {
+      // Kick off buffering once. The active video is already being fetched by
+      // play(), and load() on a video that's mid-download would throw away
+      // everything it had and start over — which on a slow link meant some
+      // videos never reached "ready" at all.
+      if (
+        displayImages[indexRef.current]?.id !== slide.id &&
+        !startedLoadsRef.current.has(slide.id)
+      ) {
+        startedLoadsRef.current.add(slide.id);
         el.preload = "auto";
         el.load();
       }
